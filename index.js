@@ -22,6 +22,29 @@ if (!TOKEN || typeof TOKEN !== 'string' || TOKEN.trim() === '') {
     process.exit(1);
 }
 
+// ============ COHERE API KEYS — 1 CHÍNH + 4 DỰ PHÒNG ============
+// Thêm 5 biến vào Render Environment (tuỳ chọn):
+//   COHERE_API_KEY_0=sk_live_key_chính_ở_đây
+//   COHERE_API_KEY_1=sk_live_key_phụ_1_ở_đây
+//   COHERE_API_KEY_2=sk_live_key_phụ_2_ở_đây
+//   COHERE_API_KEY_3=sk_live_key_phụ_3_ở_đây
+//   COHERE_API_KEY_4=sk_live_key_phụ_4_ở_đây
+//
+// Bot sẽ load keys từ environment khi khởi động
+const COHERE_KEYS = {
+    0: process.env.COHERE_API_KEY_0 || '',
+    1: process.env.COHERE_API_KEY_1 || '',
+    2: process.env.COHERE_API_KEY_2 || '',
+    3: process.env.COHERE_API_KEY_3 || '',
+    4: process.env.COHERE_API_KEY_4 || '',
+};
+
+// Kiểm tra số key đã load
+const COHERE_KEYS_COUNT = Object.values(COHERE_KEYS).filter(k => k && k.trim()).length;
+if (COHERE_KEYS_COUNT > 0) {
+    console.log(`✅ Đã tải ${COHERE_KEYS_COUNT} Cohere API key từ environment variables`);
+}
+
 const CLIENT_ID = process.env.CLIENT_ID;
 const MONGODB_URI = process.env.MONGODB_URI || process.env.MONGO_URI;
 const OWNER_ID = '1208450889246048306';
