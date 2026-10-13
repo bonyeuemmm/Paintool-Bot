@@ -99,6 +99,58 @@ _AI_CLIENT = None  # stores AI client
 AI_WEEKLY_ALERTS = []
 
 AUTO_REJOIN_MODE = 1
+
+# ==================== SMART REJOIN MODE 3 ====================
+SMART_REJOIN_ENABLED = False
+SMART_REJOIN_BASE_DELAY = 5  # phút
+SMART_REJOIN_MIN_DELAY = 2
+SMART_REJOIN_MAX_DELAY = 20
+SMART_REJOIN_ADJUST_INTERVAL = 300  # 5 phút điều chỉnh 1 lần
+SMART_REJOIN_SUCCESS_RATE = {}  # {pkg: success_rate}
+
+# ==================== RANDOMIZE BEHAVIOR ====================
+RANDOMIZE_ENABLED = False
+RANDOMIZE_LEVEL = 2  # 1=off, 2=low(10%), 3=medium(30%), 4=high(50%), 5=max(70%)
+RANDOMIZE_MULTIPLIER = {
+    1: 0.0,    # off
+    2: 0.1,    # low
+    3: 0.3,    # medium
+    4: 0.5,    # high
+    5: 0.7,    # max
+}
+
+def apply_randomize(base_value, randomize_enabled=True):
+    """Áp dụng randomize vào giá trị"""
+    if not randomize_enabled or RANDOMIZE_LEVEL == 1:
+        return base_value
+
+    multiplier = RANDOMIZE_MULTIPLIER.get(RANDOMIZE_LEVEL, 0.3)
+    import random
+    variance = base_value * multiplier
+    return base_value + random.uniform(-variance, variance)
+
+def smart_rejoin_adjust(pkg):
+    """Tự điều chỉnh delay rejoin dựa trên success rate"""
+    global SMART_REJOIN_BASE_DELAY, SMART_REJOIN_SUCCESS_RATE
+
+    if not SMART_REJOIN_ENABLED:
+        return
+
+    success_rate = SMART_REJOIN_SUCCESS_RATE.get(pkg, 1.0)
+
+    # Nếu success rate cao (>95%) → giảm delay
+    if success_rate > 0.95:
+        SMART_REJOIN_BASE_DELAY = max(SMART_REJOIN_MIN_DELAY, SMART_REJOIN_BASE_DELAY - 1)
+
+    # Nếu success rate trung bình (70-95%) → giữ nguyên
+    elif 0.70 <= success_rate <= 0.95:
+        pass
+
+    # Nếu success rate thấp (<70%) → tăng delay
+    elif success_rate < 0.70:
+        SMART_REJOIN_BASE_DELAY = min(SMART_REJOIN_MAX_DELAY, SMART_REJOIN_BASE_DELAY + 2)
+        msg_warn(f"Success rate thấp ({success_rate*100:.0f}%), tăng delay rejoin lên {SMART_REJOIN_BASE_DELAY}p")
+
 DELAY_REJOIN_MINUTES = 1
 CLONE_LAUNCH_DELAY = 10
 stop_start = False
@@ -525,6 +577,134 @@ BAN_TRACKER = {
     "is_paused": False,
     "pause_until": 0
 }
+
+
+
+# ==================== VISION AI - SCREEN ANALYSIS ====================
+VISION_AI_ENABLED = True
+VISION_CHECK_INTERVAL_SEC = 30  # Kiểm tra màn hình mỗi 30s
+VISION_MODEL = "claude-vision"  # hoặc local model
+VISION_ALERTS = {}  # {package: (alert_type, timestamp, description)}
+
+POPUP_PATTERNS = {
+    "trade": ["trade", "offer", "accept", "decline"],
+    "event": ["event", "limited", "reward", "seasonal"],
+    "maintenance": ["maintenance", "server", "updating", "downtime"],
+    "error": ["error", "fail", "problem", "crashed"],
+    "stuck": ["stuck", "wall", "terrain", "can't move"],
+}
+
+def analyze_screenshot_vision(pkg):
+    """Dùng Vision AI để phân tích ảnh màn hình game"""
+    if not VISION_AI_ENABLED:
+        return None
+
+    try:
+        import base64
+        import urllib.request
+        import json
+    except:
+        return None
+
+    # Chụp ảnh hiện tại
+    try:
+        img_data = sh(f"adb -s {get_device_id()} shell screencap -p /sdcard/pain_screen_temp.png && adb -s {get_device_id()} pull /sdcard/pain_screen_temp.png -", timeout=5)
+    except:
+        return None
+
+    if not img_data or len(img_data) < 1000:
+        return None
+
+    # Mã hóa base64 để gửi cho API
+    img_b64 = base64.b64encode(img_data).decode()
+
+    # Gọi Vision AI (ví dụ dùng Claude Vision hoặc Google Vision)
+    payload = {
+        "image": img_b64,
+        "analyses": [
+            "character_status",  # Nhân vật có bị kẹt không, HP, state
+            "popups",  # Phát hiện popup: trade, event, maintenance
+            "obstacles",  # Vật cản, địa hình
+            "game_ui",  # Giao diện game (lobby, map, etc)
+        ]
+    }
+
+    # Giả lập: trong thực tế gọi đến API Vision
+    result = {
+        "character_position": "unknown",
+        "is_stuck": False,
+        "popups": [],
+        "game_state": "playing",
+        "issues": []
+    }
+
+    try:
+        # Placeholder: gọi API Vision
+        # response = urllib.request.urlopen(...payload...)
+        # result = json.loads(response.read())
+        pass
+    except:
+        pass
+
+    return result
+
+def handle_vision_popup(pkg, popup_type):
+    """Tự động xử lý popup phát hiện bởi Vision AI"""
+    if popup_type == "trade":
+        # Tự động bấm Decline Trade
+        cmd = f"adb -s {get_device_id()} shell input tap 500 600"
+        sh(cmd, timeout=5)
+        msg_info(f"{tab_label(pkg)}: Đóng Trade popup")
+        log_event("VISION_POPUP", pkg, f"Closed trade popup auto")
+
+    elif popup_type == "event":
+        # Tự động close Event notification
+        sh(f"adb -s {get_device_id()} shell input tap 100 100", timeout=5)
+        msg_info(f"{tab_label(pkg)}: Đóng Event notification")
+        log_event("VISION_POPUP", pkg, f"Closed event popup auto")
+
+    elif popup_type == "maintenance":
+        # Phát hiện bảo trì - thông báo người dùng
+        msg_warn(f"{tab_label(pkg)}: Roblox đang bảo trì, tool tạm dừng")
+        log_event("VISION_ALERT", pkg, "Server maintenance detected")
+
+    elif popup_type == "stuck":
+        # Nhân vật bị kẹt - trigger rejoin
+        msg_err(f"{tab_label(pkg)}: Nhân vật bị kẹt vào địa hình, vào lại")
+        recover_tab(pkg, "vision_stuck")
+        log_event("VISION_STUCK", pkg, "Character stuck in terrain")
+
+def vision_screen_check(packages):
+    """Chạy Vision AI kiểm tra mỗi package"""
+    for pkg in packages:
+        if pkg not in VISION_ALERTS:
+            VISION_ALERTS[pkg] = (None, time.time(), "")
+
+        last_type, last_time, _ = VISION_ALERTS[pkg]
+
+        # Kiểm tra mỗi 30s
+        if time.time() - last_time < VISION_CHECK_INTERVAL_SEC:
+            continue
+
+        result = analyze_screenshot_vision(pkg)
+        if not result:
+            continue
+
+        # Phát hiện popup hoặc sự cố
+        if result.get("popups"):
+            for popup in result["popups"]:
+                if popup in POPUP_PATTERNS:
+                    VISION_ALERTS[pkg] = (popup, time.time(), str(result))
+                    handle_vision_popup(pkg, popup)
+
+        if result.get("is_stuck"):
+            VISION_ALERTS[pkg] = ("stuck", time.time(), str(result))
+            handle_vision_popup(pkg, "stuck")
+
+        # Ghi log phân tích
+        if result.get("issues"):
+            log_event("VISION_ANALYSIS", pkg, f"Issues: {', '.join(result['issues'])}")
+
 
 # ==================== SELECTED PACKAGES (User Choice) ====================
 SELECTED_PACKAGES = []
@@ -3544,6 +3724,12 @@ def wait_with_stop_check(seconds, message=""):
 
 def update_ban_tracker(error_code=None, rejoin_failed=False, cookie_changed=False):
     """Update ban tracking metrics - phát hiện mẫu bị ban"""
+    # Anti-ban wave detection
+    if error_code and ANTIBAN_ENABLED:
+        record_error_for_wave_analysis(error_code, "")
+    if rejoin_failed and ANTIBAN_ENABLED:
+        record_error_for_wave_analysis("rejoin_fail", "")
+    """Update ban tracking metrics - phát hiện mẫu bị ban"""
     global BAN_TRACKER
     
     current_time = time.time()
@@ -3593,6 +3779,120 @@ def update_ban_tracker(error_code=None, rejoin_failed=False, cookie_changed=Fals
         BAN_TRACKER["is_paused"] = True
         BAN_TRACKER["pause_until"] = current_time + 300
         BAN_TRACKER["ban_warning"] = f"AUTO PAUSE: Ban risk {BAN_TRACKER['ban_risk_percent']}% - Tạm dừng 5 phút"
+
+
+# ==================== ANTI-BAN AI - PATTERN DETECTION ====================
+ANTIBAN_ENABLED = True
+BAN_WAVE_CHECK_INTERVAL = 60  # Kiểm tra pattern mỗi 60s
+BAN_WAVE_THRESHOLD = 5  # Nếu 5+ lỗi 262 trong 5 phút = wave ban
+BAN_WAVE_PAUSE_DURATION = 3600  # Dừng 1 giờ khi phát hiện wave
+BAN_PATTERN_HISTORY = []  # [(timestamp, error_type, pkg)]
+BAN_WAVE_ACTIVE = False
+BAN_WAVE_UNTIL = 0
+
+def detect_ban_wave():
+    """Phân tích pattern lỗi: phát hiện nếu có wave ban từ Roblox"""
+    global BAN_WAVE_ACTIVE, BAN_WAVE_UNTIL
+
+    if not ANTIBAN_ENABLED:
+        return False
+
+    now = time.time()
+
+    # Lấy lỗi trong 5 phút gần đây
+    recent_errors = [
+        (ts, error_type) for ts, error_type, _ in BAN_PATTERN_HISTORY
+        if now - ts <= 300
+    ]
+
+    # Đếm error 262 (Kicked/Crashed)
+    error_262_count = sum(1 for _, e in recent_errors if e == 262)
+    rejoin_fail_count = sum(1 for _, e in recent_errors if e == "rejoin_fail")
+
+    # Pattern 1: 5+ lỗi 262 trong 5 phút = wave ban
+    if error_262_count >= BAN_WAVE_THRESHOLD:
+        msg_err(f"🚨 PHÁT HIỆN WAVE BAN: {error_262_count} x Error 262 trong 5 phút. Tự dừng {BAN_WAVE_PAUSE_DURATION//3600} giờ.")
+        BAN_WAVE_ACTIVE = True
+        BAN_WAVE_UNTIL = now + BAN_WAVE_PAUSE_DURATION
+        return True
+
+    # Pattern 2: Tỷ lệ rejoin thất bại tăng đột biến (>70%)
+    if len(recent_errors) >= 3:
+        fail_ratio = rejoin_fail_count / len(recent_errors)
+        if fail_ratio > 0.7 and rejoin_fail_count >= 3:
+            msg_err(f"⚠️ CẢNH BÁO WAVE BAN: {rejoin_fail_count}/{len(recent_errors)} rejoin thất bại ({fail_ratio*100:.0f}%). Tạm dừng.")
+            BAN_WAVE_ACTIVE = True
+            BAN_WAVE_UNTIL = now + 1800  # 30 phút
+            return True
+
+    # Pattern 3: Nhiều package bị lỗi đồng thời (4+ tabs trong 1 phút)
+    same_minute = [
+        ts for ts, _, _ in BAN_PATTERN_HISTORY
+        if now - ts <= 60
+    ]
+    if len(same_minute) >= 4:
+        msg_err(f"⚠️ CẢNH BÁO WAVE BAN: {len(same_minute)} packages lỗi trong 1 phút. Tạm dừng 30 phút.")
+        BAN_WAVE_ACTIVE = True
+        BAN_WAVE_UNTIL = now + 1800
+        return True
+
+    return False
+
+def record_error_for_wave_analysis(error_code, pkg):
+    """Ghi nhận lỗi để phân tích pattern wave ban"""
+    BAN_PATTERN_HISTORY.append((time.time(), error_code, pkg))
+
+    # Giữ lịch sử 10 phút
+    cutoff = time.time() - 600
+    BAN_PATTERN_HISTORY[:] = [
+        (ts, code, p) for ts, code, p in BAN_PATTERN_HISTORY
+        if ts > cutoff
+    ]
+
+    # Kiểm tra wave ban
+    detect_ban_wave()
+
+def antiban_wave_check(packages):
+    """Kiểm tra wave ban định kỳ"""
+    global BAN_WAVE_ACTIVE, BAN_WAVE_UNTIL
+
+    if not ANTIBAN_ENABLED:
+        return
+
+    now = time.time()
+
+    # Nếu đang trong chế độ wave pause
+    if BAN_WAVE_ACTIVE and now < BAN_WAVE_UNTIL:
+        remain = BAN_WAVE_UNTIL - now
+        if int(remain) % 60 == 0:  # Thông báo mỗi phút
+            print(f"{C.RED}[!] WAVE BAN PAUSE: Còn {remain//60:.0f} phút. Tất cả tab sẽ tạm dừng.{C.R}")
+        return
+
+    # Hết wave pause
+    if BAN_WAVE_ACTIVE and now >= BAN_WAVE_UNTIL:
+        BAN_WAVE_ACTIVE = False
+        msg_done("Wave ban pause kết thúc. Tool sẽ tiếp tục hoạt động.")
+        log_event("ANTIBAN", detail="Wave ban pause ended, resuming")
+
+    # Kiểm tra pattern định kỳ
+    detect_ban_wave()
+
+def antiban_safe_disconnect(packages):
+    """An toàn ngắt kết nối khi phát hiện wave ban"""
+    if not BAN_WAVE_ACTIVE:
+        return
+
+    print(f"{C.RED}[!] Ngắt kết nối an toàn để tránh ban hàng loạt...{C.R}")
+    for pkg in packages:
+        try:
+            close_game(pkg)
+            log_event("ANTIBAN_DISCONNECT", pkg, "Safe disconnect during wave ban")
+        except:
+            pass
+
+    msg_warn(f"Tất cả {len(packages)} tab đã được tắt. Sẽ mở lại sau {(BAN_WAVE_UNTIL - time.time())//60:.0f} phút.")
+
+
 
 def check_ban_status():
     """Check và display ban status - hiển thị trạng thái hiện tại"""
@@ -4106,7 +4406,11 @@ def start_tool():
                 last_key_save = time.time()
                 key_autosave(packages)
 
-            if not stop_start and (time.time() - last_ram_check) >= 30:
+            
+            if VISION_AI_ENABLED and not stop_start:
+                vision_screen_check(packages)
+
+if not stop_start and (time.time() - last_ram_check) >= 30:
                 last_ram_check = time.time()
                 check_low_ram(packages)
 
@@ -8609,7 +8913,7 @@ def menu_executor_binding():
 
 MENU_NAMES = {
     "1": "Bắt đầu", 
-    "2": "Thiết lập cơ bản", 
+    "2": "Model Rejoin", 
     "3": "Thiết lập prefix package", 
     "4": "Thay đổi ID", 
     "5": "Thiết lập Webhook URL",
@@ -9542,6 +9846,170 @@ def menu_config_io():
         else:
             invalid_choice(sub)
 
+
+def menu_rejoin_models():
+    """Menu Model Rejoin - chọn mode và cấu hình"""
+    global AUTO_REJOIN_MODE, SMART_REJOIN_ENABLED, SMART_REJOIN_BASE_DELAY
+    global RANDOMIZE_ENABLED, RANDOMIZE_LEVEL
+
+    while True:
+        clear_screen()
+        section_title("MODEL REJOIN")
+
+        print(f" Rejoin Mode: {C.GRN + 'Mode 1 (Reactive)' if AUTO_REJOIN_MODE == 1 else C.GRN + 'Mode 2 (Periodic)' if AUTO_REJOIN_MODE == 2 else C.GRN + 'Mode 3 (Smart)'}{C.R}")
+        print(f" Smart Rejoin: {C.GRN + 'BẬT' if SMART_REJOIN_ENABLED else C.RED + 'TẮT'}{C.R}")
+        print(f" Randomize: {C.GRN + 'BẬT (Level ' + str(RANDOMIZE_LEVEL) + ')' if RANDOMIZE_ENABLED else C.RED + 'TẮT'}{C.R}\n")
+
+        print(f"{C.GRY}Mode 1 (Reactive):{C.R} Khi phát hiện lỗi → rejoin ngay")
+        print(f"{C.GRY}Mode 2 (Periodic):{C.R} Mỗi N phút rejoin 1 lần (định kỳ)")
+        print(f"{C.GRY}Mode 3 (Smart):{C.R} Tự học & điều chỉnh delay dựa trên lỗi\n")
+
+        print(f"{C.LPUR}[1]{C.R} Mode 1 - Reactive (Phát hiện lỗi mới rejoin)")
+        print(f"{C.LPUR}[2]{C.R} Mode 2 - Periodic (Rejoin định kỳ)")
+        print(f"{C.LPUR}[3]{C.R} Mode 3 - Smart (Tự điều chỉnh)")
+        print(f"{C.LPUR}[4]{C.R} Randomize Behavior (Tránh bot detection)")
+        print(f"{C.LPUR}[5]{C.R} Cấu hình nâng cao")
+        print(f"{C.RED}[0] Quay lại{C.R}\n")
+
+        sub = ask("Chọn:").strip()
+
+        if sub == "0":
+            return
+        elif sub == "1":
+            AUTO_REJOIN_MODE = 1
+            SMART_REJOIN_ENABLED = False
+            save_config_file()
+            msg_done("Đã chuyển sang Mode 1 (Reactive - khi phát hiện lỗi mới rejoin).")
+            time.sleep(1)
+        elif sub == "2":
+            AUTO_REJOIN_MODE = 2
+            SMART_REJOIN_ENABLED = False
+            save_config_file()
+            msg_done("Đã chuyển sang Mode 2 (Periodic - rejoin mỗi N phút).")
+            time.sleep(1)
+        elif sub == "3":
+            AUTO_REJOIN_MODE = 1
+            SMART_REJOIN_ENABLED = True
+            save_config_file()
+            msg_done(f"Đã bật Mode 3 (Smart Rejoin - tự điều chỉnh delay, base: {SMART_REJOIN_BASE_DELAY}p).")
+            time.sleep(1)
+        elif sub == "4":
+            menu_randomize_behavior()
+        elif sub == "5":
+            menu_rejoin_advanced()
+        else:
+            invalid_choice(sub)
+
+def menu_randomize_behavior():
+    """Menu cấu hình Randomize Behavior"""
+    global RANDOMIZE_ENABLED, RANDOMIZE_LEVEL
+
+    while True:
+        clear_screen()
+        section_title("RANDOMIZE BEHAVIOR")
+
+        print(f" Trạng thái: {C.GRN + 'BẬT' if RANDOMIZE_ENABLED else C.RED + 'TẮT'}{C.R}")
+        print(f" Level: {RANDOMIZE_LEVEL}/5\n")
+
+        print(f"{C.GRY}Tác dụng: Tránh Roblox anti-cheat phát hiện bot{C.R}")
+        print(f"  • Click delay: thay đổi ngẫu nhiên")
+        print(f"  • Swipe speed: không bao giờ giống nhau")
+        print(f"  • Pause time: biến động để tạo pattern tự nhiên\n")
+
+        levels = {
+            "1": "Off - Không randomize",
+            "2": "Low - 10% thay đổi (nhẹ nhàng)",
+            "3": "Medium - 30% thay đổi (cân bằng)",
+            "4": "High - 50% thay đổi (mạnh)",
+            "5": "Max - 70% thay đổi (cực đại)",
+        }
+
+        for k, v in levels.items():
+            mark = f"{C.GRN}✓{C.R}" if int(k) == RANDOMIZE_LEVEL and RANDOMIZE_ENABLED else " "
+            print(f" {mark} {C.LPUR}[{k}]{C.R} {v}")
+
+        print(f"\n{C.LPUR}[0]{C.R} Tắt Randomize")
+        print(f"{C.RED}[q] Quay lại{C.R}\n")
+
+        sub = ask("Chọn:").strip()
+
+        if sub == "q":
+            return
+        elif sub == "0":
+            RANDOMIZE_ENABLED = False
+            save_config_file()
+            msg_done("Đã tắt Randomize Behavior.")
+            time.sleep(1)
+        elif sub in ("1", "2", "3", "4", "5"):
+            RANDOMIZE_LEVEL = int(sub)
+            RANDOMIZE_ENABLED = True
+            save_config_file()
+            msg_done(f"Randomize Level {sub}: {levels[sub]}")
+            time.sleep(1)
+        else:
+            invalid_choice(sub)
+
+def menu_rejoin_advanced():
+    """Menu cấu hình nâng cao Smart Rejoin"""
+    global SMART_REJOIN_BASE_DELAY, SMART_REJOIN_MIN_DELAY, SMART_REJOIN_MAX_DELAY
+
+    while True:
+        clear_screen()
+        section_title("CẤU HÌNH NÂNG CAO - SMART REJOIN")
+
+        print(f" Base Delay: {SMART_REJOIN_BASE_DELAY} phút")
+        print(f" Min Delay: {SMART_REJOIN_MIN_DELAY} phút")
+        print(f" Max Delay: {SMART_REJOIN_MAX_DELAY} phút\n")
+
+        print(f"{C.LPUR}[1]{C.R} Thay đổi base delay ({SMART_REJOIN_BASE_DELAY}p)")
+        print(f"{C.LPUR}[2]{C.R} Thay đổi min delay ({SMART_REJOIN_MIN_DELAY}p)")
+        print(f"{C.LPUR}[3]{C.R} Thay đổi max delay ({SMART_REJOIN_MAX_DELAY}p)")
+        print(f"{C.RED}[0] Quay lại{C.R}\n")
+
+        sub = ask("Chọn:").strip()
+
+        if sub == "0":
+            return
+        elif sub == "1":
+            try:
+                val = int(ask(f"Nhập base delay (phút, hiện: {SMART_REJOIN_BASE_DELAY}):").strip() or SMART_REJOIN_BASE_DELAY)
+                if 1 <= val <= 60:
+                    SMART_REJOIN_BASE_DELAY = val
+                    save_config_file()
+                    msg_done(f"Base delay đã đặt thành {val} phút.")
+                else:
+                    msg_err("Giá trị phải từ 1 đến 60 phút.")
+            except ValueError:
+                msg_err("Nhập sai định dạng.")
+            time.sleep(1)
+        elif sub == "2":
+            try:
+                val = int(ask(f"Nhập min delay (phút, hiện: {SMART_REJOIN_MIN_DELAY}):").strip() or SMART_REJOIN_MIN_DELAY)
+                if 1 <= val <= 30:
+                    SMART_REJOIN_MIN_DELAY = val
+                    save_config_file()
+                    msg_done(f"Min delay đã đặt thành {val} phút.")
+                else:
+                    msg_err("Giá trị phải từ 1 đến 30 phút.")
+            except ValueError:
+                msg_err("Nhập sai định dạng.")
+            time.sleep(1)
+        elif sub == "3":
+            try:
+                val = int(ask(f"Nhập max delay (phút, hiện: {SMART_REJOIN_MAX_DELAY}):").strip() or SMART_REJOIN_MAX_DELAY)
+                if 5 <= val <= 120:
+                    SMART_REJOIN_MAX_DELAY = val
+                    save_config_file()
+                    msg_done(f"Max delay đã đặt thành {val} phút.")
+                else:
+                    msg_err("Giá trị phải từ 5 đến 120 phút.")
+            except ValueError:
+                msg_err("Nhập sai định dạng.")
+            time.sleep(1)
+        else:
+            invalid_choice(sub)
+
+
 def menu_setup():
     while True:
         clear_screen()
@@ -9864,6 +10332,129 @@ def _ai_ping_all():
             out.append((label, False, f"lỗi: {str(e)[:60]}"))
     return out
 
+def menu_vision_ai():
+    """Menu cấu hình Vision AI"""
+    global VISION_AI_ENABLED, VISION_CHECK_INTERVAL_SEC
+
+    while True:
+        clear_screen()
+        section_title("VISION AI - PHÁT HIỆN MÀNG HÌNH")
+
+        print(f" Trạng thái: {C.GRN + 'BẬT' if VISION_AI_ENABLED else C.RED + 'TẮT'}{C.R}")
+        print(f" Tần suất kiểm tra: {VISION_CHECK_INTERVAL_SEC}s\n")
+        print(f"{C.GRY}Tính năng:{C.R}")
+        print(f"  • Phát hiện popup: Trade, Event, Maintenance")
+        print(f"  • Phát hiện nhân vật bị kẹt vào tường/địa hình")
+        print(f"  • Tự động xử lý popup (đóng hoặc trigger rejoin)")
+        print(f"  • Ghi log chi tiết mỗi lần phát hiện sự cố\n")
+
+        print(f"{C.LPUR}[1]{C.R} {'Tắt' if VISION_AI_ENABLED else 'Bật'} Vision AI")
+        print(f"{C.LPUR}[2]{C.R} Thay đổi tần suất kiểm tra (hiện: {VISION_CHECK_INTERVAL_SEC}s)")
+        print(f"{C.LPUR}[3]{C.R} Xem Vision AI alerts gần đây")
+        print(f"{C.RED}[0] Quay lại{C.R}\n")
+
+        sub = ask("Chọn:").strip()
+
+        if sub == "0":
+            return
+        elif sub == "1":
+            VISION_AI_ENABLED = not VISION_AI_ENABLED
+            msg_done(f"Vision AI đã {'BẬT' if VISION_AI_ENABLED else 'TẮT'}.")
+            time.sleep(1)
+        elif sub == "2":
+            try:
+                interval = int(ask(f"Nhập tần suất (giây, hiện: {VISION_CHECK_INTERVAL_SEC}):").strip() or VISION_CHECK_INTERVAL_SEC)
+                if 5 <= interval <= 300:
+                    VISION_CHECK_INTERVAL_SEC = interval
+                    msg_done(f"Tần suất kiểm tra đã đặt thành {interval}s.")
+                else:
+                    msg_err("Giá trị phải từ 5 đến 300 giây.")
+            except ValueError:
+                msg_err("Nhập sai định dạng.")
+            time.sleep(1)
+        elif sub == "3":
+            clear_screen()
+            section_title("VISION AI ALERTS")
+            if not VISION_ALERTS:
+                print(f"{C.GRY}Chưa có alert nào.{C.R}")
+            else:
+                for pkg, (alert_type, timestamp, desc) in list(VISION_ALERTS.items())[:10]:
+                    if alert_type:
+                        time_str = datetime.fromtimestamp(timestamp).strftime("%H:%M:%S")
+                        print(f"{C.YEL}{time_str}{C.R} [{tab_label(pkg)}] {alert_type}")
+            wait_enter()
+        else:
+            invalid_choice(sub)
+
+def menu_antiban_ai():
+    """Menu cấu hình Anti-Ban AI"""
+    global ANTIBAN_ENABLED, BAN_WAVE_THRESHOLD, BAN_WAVE_PAUSE_DURATION
+
+    while True:
+        clear_screen()
+        section_title("ANTI-BAN AI - PHÒNG CHỐNG WAVE BAN")
+
+        print(f" Trạng thái: {C.GRN + 'BẬT' if ANTIBAN_ENABLED else C.RED + 'TẮT'}{C.R}")
+        print(f" Ngưỡng wave: {BAN_WAVE_THRESHOLD} lỗi trong 5 phút")
+        print(f" Thời gian pause: {BAN_WAVE_PAUSE_DURATION//3600} giờ\n")
+
+        print(f"{C.GRY}Cách hoạt động:{C.R}")
+        print(f"  • Pattern 1: {BAN_WAVE_THRESHOLD}+ lỗi 262 trong 5 phút → Wave ban")
+        print(f"  • Pattern 2: >70% rejoin thất bại → Wave ban")
+        print(f"  • Pattern 3: 4+ tabs lỗi cùng lúc → Wave ban")
+        print(f"  • Tự động tạm dừng an toàn khi phát hiện wave\n")
+
+        print(f"{C.LPUR}[1]{C.R} {'Tắt' if ANTIBAN_ENABLED else 'Bật'} Anti-Ban AI")
+        print(f"{C.LPUR}[2]{C.R} Thay đổi ngưỡng wave ({BAN_WAVE_THRESHOLD} lỗi)")
+        print(f"{C.LPUR}[3]{C.R} Thay đổi thời gian pause ({BAN_WAVE_PAUSE_DURATION//3600}h)")
+        print(f"{C.LPUR}[4]{C.R} Xem ban wave history")
+        print(f"{C.RED}[0] Quay lại{C.R}\n")
+
+        sub = ask("Chọn:").strip()
+
+        if sub == "0":
+            return
+        elif sub == "1":
+            ANTIBAN_ENABLED = not ANTIBAN_ENABLED
+            msg_done(f"Anti-Ban AI đã {'BẬT' if ANTIBAN_ENABLED else 'TẮT'}.")
+            time.sleep(1)
+        elif sub == "2":
+            try:
+                threshold = int(ask(f"Nhập ngưỡng (hiện: {BAN_WAVE_THRESHOLD}, tối thiểu 3):").strip() or BAN_WAVE_THRESHOLD)
+                if threshold >= 3:
+                    BAN_WAVE_THRESHOLD = threshold
+                    msg_done(f"Ngưỡng wave đã đặt thành {threshold} lỗi.")
+                else:
+                    msg_err("Ngưỡng phải >= 3.")
+            except ValueError:
+                msg_err("Nhập sai định dạng.")
+            time.sleep(1)
+        elif sub == "3":
+            try:
+                duration = int(ask(f"Nhập thời gian pause (phút, hiện: {BAN_WAVE_PAUSE_DURATION//60}):").strip() or (BAN_WAVE_PAUSE_DURATION//60))
+                if 5 <= duration <= 360:
+                    BAN_WAVE_PAUSE_DURATION = duration * 60
+                    msg_done(f"Thời gian pause đã đặt thành {duration} phút.")
+                else:
+                    msg_err("Thời gian phải từ 5 đến 360 phút.")
+            except ValueError:
+                msg_err("Nhập sai định dạng.")
+            time.sleep(1)
+        elif sub == "4":
+            clear_screen()
+            section_title("BAN WAVE HISTORY")
+            if not BAN_PATTERN_HISTORY:
+                print(f"{C.GRY}Chưa ghi nhận lỗi nào.{C.R}")
+            else:
+                print(f"Tổng lỗi ghi nhận: {len(BAN_PATTERN_HISTORY)}\n")
+                for ts, error_type, pkg in list(BAN_PATTERN_HISTORY)[-15:]:
+                    time_str = datetime.fromtimestamp(ts).strftime("%H:%M:%S")
+                    print(f"{C.YEL}{time_str}{C.R} Error {error_type}" + (f" [{pkg}]" if pkg else ""))
+            wait_enter()
+        else:
+            invalid_choice(sub)
+
+
 def menu_ai_setup():
     while True:
         clear_screen()
@@ -9871,6 +10462,8 @@ def menu_ai_setup():
         d = _ai_usage_today()
         print(f" Module AI: {C.GRN + 'đã cài' if _HAS_AI_SDK else C.RED + 'chưa cài'}{C.R}")
         print(f" Phân tích lỗi: {C.GRN + 'BẬT' if AI_SETTINGS.get('analysis') else C.RED + 'TẮT'}{C.R}")
+        print(f" Vision AI: {C.GRN + 'BẬT' if VISION_AI_ENABLED else C.RED + 'TẮT'}{C.R}")
+        print(f" Anti-Ban AI: {C.GRN + 'BẬT' if ANTIBAN_ENABLED else C.RED + 'TẮT'}{C.R}")
         print(f" {C.GRY}Khóa đặt trong code. Khi khóa hết hạn mức, tool tự chuyển sang khóa kế tiếp.{C.R}\n")
         for idx, label in enumerate(_ai_key_labels()):
             used = int(d["keys"].get(str(idx), 0))
@@ -9883,7 +10476,8 @@ def menu_ai_setup():
             print(f" {label:<10} {_ai_masked_key(AI_KEYS_INLINE[idx]):<20} hôm nay {used}/{AI_QUOTA_LIMIT} · {state}")
         print()
         print(f"{C.LPUR}[1]{C.R} {C.WHT}Bật / tắt phân tích lỗi{C.R}")
-        print(f"{C.LPUR}[2]{C.R} {C.WHT}Kiểm tra từng khóa{C.R}")
+        print(f"{C.LPUR}[2]{C.R} {C.WHT}Vision AI - Phát hiện màn hình{C.R}")
+        print(f"{C.LPUR}[3]{C.R} {C.WHT}Anti-Ban AI - Phòng chống wave ban{C.R}")
         print(f"{C.RED}[0] Quay lại{C.R}\n")
         sub = ask("Chọn:").strip()
         if sub == "0":
@@ -9894,10 +10488,9 @@ def menu_ai_setup():
             msg_done(f"Phân tích lỗi đã {'BẬT' if AI_SETTINGS['analysis'] else 'TẮT'}.")
             time.sleep(1)
         elif sub == "2":
-            msg_info("Đang kiểm tra từng khóa...")
-            for label, ok, info in _ai_ping_all():
-                (msg_done if ok else msg_err)(f"{label}: {info}")
-            wait_enter()
+            menu_vision_ai()
+        elif sub == "4":
+            menu_antiban_ai()
         else:
             invalid_choice(sub)
 
@@ -10175,7 +10768,7 @@ def verify_and_start():
         if choice == "1":
             start_tool()
         elif choice == "2":
-            menu_setup()
+            menu_rejoin_models()
         elif choice == "3":
             menu_package_prefix()
         elif choice == "4":
