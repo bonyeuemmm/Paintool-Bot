@@ -36,7 +36,7 @@ except ImportError:
                     key, val = line.split('=', 1)
                     os.environ[key.strip()] = val.strip().strip('"').strip("'")
 
-VERSION = "v2.5.6"
+VERSION = "v2.5.8"
 
 # ==================== GLOBAL CONSTANTS (SERVER_URL / SECRET_KEY) ====================
 SERVER_URL = "https://paintool-bot.onrender.com/api/verify"
