@@ -36,7 +36,7 @@ except ImportError:
                     key, val = line.split('=', 1)
                     os.environ[key.strip()] = val.strip().strip('"').strip("'")
 
-VERSION = "v2.5.8"
+VERSION = "v2.7.1"
 
 # ==================== GLOBAL CONSTANTS (SERVER_URL / SECRET_KEY) ====================
 SERVER_URL = "https://paintool-bot.onrender.com/api/verify"
@@ -5437,7 +5437,28 @@ MUSIC = {"proc": None, "url": ""}
 
 def _music_playing():
     p = MUSIC.get("proc")
-    return p is not None and p.poll() is None
+    if p is not None:
+        return p.poll() is None
+    return bool(MUSIC.get("termux") and MUSIC.get("url"))
+
+_MUSIC_FLASH = {"msg": "", "ok": True}
+
+def _music_flash(ok, text):
+    """Lưu thông báo để hiển thị sau khi màn hình được vẽ lại (không bị xóa ngay)."""
+    _MUSIC_FLASH["ok"] = ok
+    _MUSIC_FLASH["msg"] = text
+
+def _music_status_block(url_hint=None):
+    """Dòng trạng thái đang phát và thông báo vừa xảy ra, in ngay dưới tiêu đề."""
+    if _music_playing():
+        cur = MUSIC.get("url", "")
+        print(f" {C.GRN}▶ ĐANG PHÁT{C.R} {C.GRY}{cur[:60]}{C.R}")
+    if _MUSIC_FLASH["msg"]:
+        col = C.GRN if _MUSIC_FLASH["ok"] else C.RED
+        print(f" {col}{_MUSIC_FLASH['msg']}{C.R}")
+        _MUSIC_FLASH["msg"] = ""
+    if _music_playing():
+        print()
 
 def _music_wake(on):
     """Giữ Termux thức khi đang phát nhạc, để Android không tạm dừng khi tắt màn hình."""
@@ -5711,19 +5732,21 @@ def menu_music_history():
     while True:
         clear_screen()
         section_title("LỊCH SỬ NGHE NHẠC")
+        _music_status_block()
         items = _music_store_load()["history"]
         if not items:
             print(f" {C.GRY}Chưa có bài nào.{C.R}")
         for i, h in enumerate(items, 1):
-            print(f"  {C.LPUR}{i:2}.{C.R} {C.GRY}{h.get('time', '')}{C.R} {h.get('url', '')[:60]}")
+            mark = f"{C.GRN}▶{C.R} " if _music_playing() and h.get("url") == MUSIC.get("url") else "  "
+            print(f"{mark}{C.LPUR}{i:2}.{C.R} {C.GRY}{h.get('time', '')}{C.R} {h.get('url', '')[:60]}")
         print(f"\n {C.GRY}Nhập số để phát lại · 0 quay lại{C.R}")
         raw = ask("Chọn:").strip()
         if raw in ("", "0"):
             return
         if raw.isdigit() and 1 <= int(raw) <= len(items):
+            msg_info("Đang mở nhạc...")
             ok, info = music_play(items[int(raw) - 1]["url"])
-            (msg_done if ok else msg_err)("Đang phát." if ok else f"Không phát được: {info}")
-            time.sleep(1.5)
+            _music_flash(ok, "Đang phát ở nền." if ok else f"Không phát được: {info}")
         else:
             invalid_choice(raw)
             time.sleep(0.8)
@@ -5732,6 +5755,7 @@ def menu_music_favorites():
     while True:
         clear_screen()
         section_title("NHẠC YÊU THÍCH")
+        _music_status_block()
         d = _music_store_load()
         favs = d["favorites"]
         if not favs:
@@ -5760,9 +5784,9 @@ def menu_music_favorites():
                 msg_done("Đã xóa.")
             time.sleep(1)
         elif raw.isdigit() and 1 <= int(raw) <= len(favs):
+            msg_info("Đang mở nhạc...")
             ok, info = music_play(favs[int(raw) - 1]["url"])
-            (msg_done if ok else msg_err)("Đang phát." if ok else f"Không phát được: {info}")
-            time.sleep(1.5)
+            _music_flash(ok, "Đang phát ở nền." if ok else f"Không phát được: {info}")
         else:
             invalid_choice(raw)
             time.sleep(0.8)
@@ -7965,7 +7989,7 @@ def _package_label(pkg):
 def _pkg_picker_fallback(pkgs):
     """Khi stdin không phải terminal: chỉ hiện danh sách, không chạm được."""
     clear_screen()
-    section_title("DANH SÁCH PACKAGE TRÊN MÁY")
+    section_title("TÌM KIẾM PACKAGE")
     for i, pkg in enumerate(pkgs, 1):
         print(f"  {i:3}. {_package_label(pkg)}")
     wait_enter()
@@ -8001,7 +8025,7 @@ def search_packages_by_keyword():
 
     def page_size():
         lines, _ = term_size()
-        return max(3, lines - HEADER_ROWS - 3)
+        return max(3, lines - HEADER_ROWS - 4)
 
     def draw():
         lines, cols = term_size()
@@ -8010,11 +8034,12 @@ def search_packages_by_keyword():
         state["offset"] = max(0, min(state["offset"], max(0, len(shown) - ps)))
         pages = max(1, -(-len(shown) // ps))
         cur_page = state["offset"] // ps + 1
-        out = ["\033[H\033[2J"]
-        out.append(f"{C.WHT}DANH SÁCH PACKAGE TRÊN MÁY{C.R}\n")
-        out.append(f"{C.GRY}{'─' * max(10, min(cols - 1, 60))}{C.R}\n")
-        out.append(f"{C.GRY}Tổng {len(packages)} · Hiện {len(shown)} · Trang {cur_page}/{pages}{C.R}\n")
-        out.append(f"{C.GRY}Chạm package để copy · Gõ để lọc · +/- đổi trang · Enter thoát{C.R}\n")
+        rows = [
+            f"{C.WHT}TÌM KIẾM PACKAGE{C.R}",
+            f"{C.GRY}{'─' * max(10, min(cols - 1, 60))}{C.R}",
+            f"{C.GRY}Tổng {len(packages)} · Hiện {len(shown)} · Trang {cur_page}/{pages}{C.R}",
+            f"{C.GRY}Chạm package để copy · Gõ để lọc · +/- đổi trang · Enter thoát{C.R}",
+        ]
         width = max(10, cols - 6)
         for r in range(ps):
             idx = state["offset"] + r
@@ -8024,12 +8049,20 @@ def search_packages_by_keyword():
                 alias = ALIASES.get(pkg, "")
                 alias_part = f" ({alias})" if alias else ""
                 tag = " [prefix]" if PACKAGE_PREFIX and pkg.startswith(PACKAGE_PREFIX) else ""
-                line_plain = f"{idx + 1:4}. {text}"
-                out.append(f"{C.WHT}{line_plain}{C.R}{C.GRY}{alias_part}{tag}{C.R}\n")
+                rows.append(f"{C.WHT}{idx + 1:4}. {text}{C.R}{C.GRY}{alias_part}{tag}{C.R}")
             else:
+                rows.append("")
+        rows.append("")
+        rows.append(f"{C.WHT}Lọc:{C.R} {state['filt']}_")
+        msg_color = C.GRN if state["msg"].startswith("✓") else C.YEL
+        rows.append(f"{msg_color}{state['msg']}{C.R}")
+        # Vẽ đè từ đầu màn hình, mỗi dòng xóa phần thừa; không xóa cả màn hình
+        out = ["\033[H"]
+        for i, line in enumerate(rows):
+            out.append(line + "\033[K")
+            if i < len(rows) - 1:
                 out.append("\n")
-        out.append(f"\n{C.WHT}Lọc:{C.R} {state['filt']}_\n")
-        out.append(f"{C.GRN if state['msg'].startswith('✓') else C.YEL}{state['msg']}{C.R}")
+        out.append("\033[J")
         sys.stdout.write("".join(out))
         sys.stdout.flush()
 
@@ -8815,7 +8848,7 @@ def menu_setup():
         print(f"{C.LPUR}[4]{C.R} {C.WHT}Auto Backup data tab [{'Bật' if AUTO_BACKUP else 'Tắt'}]{C.R}")
         print(f"{C.LPUR}[5]{C.R} {C.WHT}Cảnh báo RAM thấp [{'Bật' if LOW_RAM_ALERT else 'Tắt'}]{C.R}")
         print(f"{C.LPUR}[6]{C.R} {C.WHT}Profile cấu hình [{len(PROFILES)} profile]{C.R}")
-        print(f"{C.LPUR}[7]{C.R} {C.WHT}Danh sách package trên máy (chọn để copy){C.R}")
+        print(f"{C.LPUR}[7]{C.R} {C.WHT}Tìm kiếm package (chạm để copy){C.R}")
         print(f"{C.LPUR}[8]{C.R} {C.WHT}Hẹn giờ tự chạy / tự dừng [{'Bật' if (SCHEDULE.get('start') or SCHEDULE.get('stop')) else 'Tắt'}]{C.R}")
         print(f"{C.LPUR}[9]{C.R} {C.WHT}Graphics Optimizer (đồ họa thấp + giới hạn FPS) [{gfx_settings_label()}]{C.R}")
         print(f"{C.LPUR}[10]{C.R} {C.WHT}Biệt danh tab (Alias) [{len(ALIASES)} tab]{C.R}")
