@@ -5470,6 +5470,7 @@ def _ytdlp_cmd():
     return None
 
 def music_stop():
+    import subprocess
     p = MUSIC.get("proc")
     if p is not None and p.poll() is None:
         _music_wake(False)
@@ -5481,6 +5482,13 @@ def music_stop():
                 p.kill()
             except Exception:
                 pass
+    if MUSIC.get("termux") and shutil.which("termux-media-player"):
+        try:
+            subprocess.run(["termux-media-player", "stop"], timeout=10, stdin=subprocess.DEVNULL,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+    MUSIC["termux"] = False
     MUSIC["proc"] = None
     MUSIC["url"] = ""
 
@@ -5502,18 +5510,31 @@ def music_play(url):
         if ytdlp and len(ytdlp) == 1:
             cmd.append("--script-opts=ytdl_hook-ytdl_path=" + ytdlp[0])
         cmd.append(url)
-        managed = True
     elif ytdlp and shutil.which("termux-media-player"):
-        lines = (run_cmd(ytdlp + ["-g", "-f", "bestaudio", "--no-playlist", url], timeout=60) or "").strip().splitlines()
-        if not lines:
-            return False, "yt-dlp không lấy được luồng âm thanh (link lỗi hoặc video bị chặn)"
-        # termux-media-player chỉ gửi lệnh cho dịch vụ rồi thoát, nên kiểm tra mã thoát thay vì tiến trình
-        res = subprocess.run(["termux-media-player", "play", lines[0]], stdin=subprocess.DEVNULL,
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20)
+        # Không mở link trực tiếp: tải âm thanh về file rồi phát file bằng termux-media-player
+        audio = os.path.join(os.path.expanduser("~"), ".pain_music.m4a")
+        try:
+            dl = subprocess.run(ytdlp + ["-f", "bestaudio[ext=m4a]/bestaudio", "--no-playlist", "--no-part",
+                                         "--force-overwrites", "-o", audio, url],
+                                capture_output=True, text=True, encoding="utf-8", errors="replace",
+                                timeout=600, stdin=subprocess.DEVNULL)
+        except subprocess.TimeoutExpired:
+            return False, "tải âm thanh quá lâu (hết 10 phút), thử link khác"
+        if dl.returncode != 0 or not os.path.exists(audio):
+            tail = [x.strip() for x in (dl.stderr or "").splitlines() if x.strip()]
+            reason = tail[-1] if tail else "không rõ lý do"
+            return False, f"yt-dlp không tải được âm thanh ({reason[:160]})"
+        try:
+            res = subprocess.run(["termux-media-player", "play", audio], capture_output=True, text=True,
+                                 encoding="utf-8", errors="replace", timeout=20, stdin=subprocess.DEVNULL)
+        except Exception as e:
+            return False, f"không chạy được termux-media-player ({e})"
         if res.returncode != 0:
-            return False, "termux-media-player báo lỗi (cài Termux:API app và chạy lại)"
+            detail = ((res.stderr or res.stdout or "").strip().splitlines() or ["không rõ lý do"])[-1]
+            return False, f"termux-media-player lỗi: {detail[:160]}. Hãy cài app Termux:API và cấp quyền cho nó"
         MUSIC["proc"] = None
         MUSIC["url"] = url
+        MUSIC["termux"] = True
         try:
             _music_history_add(url)
         except Exception:
@@ -9086,7 +9107,6 @@ def menu_ai_setup():
         d = _ai_usage_today()
         print(f" Module AI: {C.GRN + 'đã cài' if _HAS_AI_SDK else C.RED + 'chưa cài'}{C.R}")
         print(f" Phân tích lỗi: {C.GRN + 'BẬT' if AI_SETTINGS.get('analysis') else C.RED + 'TẮT'}{C.R}")
-        print(f" {C.GRY}Khóa đặt trong code. Khi khóa hết hạn mức, tool tự chuyển sang khóa kế tiếp.{C.R}\n")
         print()
         print(f"{C.LPUR}[1]{C.R} {C.WHT}Bật / tắt phân tích lỗi{C.R}")
         print(f"{C.RED}[0] Quay lại{C.R}\n")
