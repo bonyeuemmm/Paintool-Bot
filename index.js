@@ -112,6 +112,35 @@ app.get('/', (req, res) => {
     res.status(200).send('Bot is active and running successfully!');
 });
 
+// ROUTE KIỂM TRA PHIÊN BẢN VÀ TẢI BẢN CẬP NHẬT
+// Phiên bản lấy trực tiếp từ dòng VERSION trong paintoolpremium.py trên server,
+// nên chỉ cần sửa file là phiên bản và bản tải về luôn khớp nhau.
+const PREMIUM_FILE = path.join(__dirname, 'paintoolpremium.py');
+
+const readToolVersion = () => {
+    try {
+        const text = fs.readFileSync(PREMIUM_FILE, 'utf8');
+        const m = text.match(/^VERSION\s*=\s*"([^"]+)"/m);
+        return m ? m[1] : null;
+    } catch (e) {
+        return null;
+    }
+};
+
+app.get('/api/version', (req, res) => {
+    const version = readToolVersion();
+    if (!version) return res.status(404).json({ error: 'version_not_found' });
+    res.json({ version });
+});
+
+app.get('/api/download/latest', (req, res) => {
+    if (!fs.existsSync(PREMIUM_FILE)) return res.status(404).send('file_not_found');
+    res.type('text/plain; charset=utf-8');
+    res.sendFile(PREMIUM_FILE, (err) => {
+        if (err && !res.headersSent) res.status(500).send('server_error');
+    });
+});
+
 // ROUTE XÁC THỰC VÀ PHÁT CODE PREMIUM TRỰC TIẾP
 app.post(['/', '/api/verify'], async (req, res) => {
     const { key, hwid, timestamp, signature } = req.body;
@@ -155,7 +184,15 @@ app.post(['/', '/api/verify'], async (req, res) => {
 
         // Lấy key từ Render tự động thay thế vào vị trí đại diện
         const groqKey = process.env.GROQ_API_KEY || "";
-        const updatedCode = rawCode.replace("MY_GROQ_KEY_PLACEHOLDER", groqKey);
+        let updatedCode = rawCode.replace("MY_GROQ_KEY_PLACEHOLDER", () => groqKey);
+
+        // Thay các khóa Cohere trong code bằng biến COHERE_API_KEY_0..4 trên Render
+        for (let i = 0; i < 5; i++) {
+            const k = COHERE_KEYS[i];
+            if (k && k.trim()) {
+                updatedCode = updatedCode.replace(`"PASTE_KEY_${i + 1}_HERE"`, () => JSON.stringify(k.trim()));
+            }
+        }
 
         const encodedCode = Buffer.from(updatedCode).toString('base64');
 

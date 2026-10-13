@@ -99,58 +99,6 @@ _AI_CLIENT = None  # stores AI client
 AI_WEEKLY_ALERTS = []
 
 AUTO_REJOIN_MODE = 1
-
-# ==================== SMART REJOIN MODE 3 ====================
-SMART_REJOIN_ENABLED = False
-SMART_REJOIN_BASE_DELAY = 5  # phút
-SMART_REJOIN_MIN_DELAY = 2
-SMART_REJOIN_MAX_DELAY = 20
-SMART_REJOIN_ADJUST_INTERVAL = 300  # 5 phút điều chỉnh 1 lần
-SMART_REJOIN_SUCCESS_RATE = {}  # {pkg: success_rate}
-
-# ==================== RANDOMIZE BEHAVIOR ====================
-RANDOMIZE_ENABLED = False
-RANDOMIZE_LEVEL = 2  # 1=off, 2=low(10%), 3=medium(30%), 4=high(50%), 5=max(70%)
-RANDOMIZE_MULTIPLIER = {
-    1: 0.0,    # off
-    2: 0.1,    # low
-    3: 0.3,    # medium
-    4: 0.5,    # high
-    5: 0.7,    # max
-}
-
-def apply_randomize(base_value, randomize_enabled=True):
-    """Áp dụng randomize vào giá trị"""
-    if not randomize_enabled or RANDOMIZE_LEVEL == 1:
-        return base_value
-
-    multiplier = RANDOMIZE_MULTIPLIER.get(RANDOMIZE_LEVEL, 0.3)
-    import random
-    variance = base_value * multiplier
-    return base_value + random.uniform(-variance, variance)
-
-def smart_rejoin_adjust(pkg):
-    """Tự điều chỉnh delay rejoin dựa trên success rate"""
-    global SMART_REJOIN_BASE_DELAY, SMART_REJOIN_SUCCESS_RATE
-
-    if not SMART_REJOIN_ENABLED:
-        return
-
-    success_rate = SMART_REJOIN_SUCCESS_RATE.get(pkg, 1.0)
-
-    # Nếu success rate cao (>95%) → giảm delay
-    if success_rate > 0.95:
-        SMART_REJOIN_BASE_DELAY = max(SMART_REJOIN_MIN_DELAY, SMART_REJOIN_BASE_DELAY - 1)
-
-    # Nếu success rate trung bình (70-95%) → giữ nguyên
-    elif 0.70 <= success_rate <= 0.95:
-        pass
-
-    # Nếu success rate thấp (<70%) → tăng delay
-    elif success_rate < 0.70:
-        SMART_REJOIN_BASE_DELAY = min(SMART_REJOIN_MAX_DELAY, SMART_REJOIN_BASE_DELAY + 2)
-        msg_warn(f"Success rate thấp ({success_rate*100:.0f}%), tăng delay rejoin lên {SMART_REJOIN_BASE_DELAY}p")
-
 DELAY_REJOIN_MINUTES = 1
 CLONE_LAUNCH_DELAY = 10
 stop_start = False
@@ -391,10 +339,6 @@ def log_event(kind, pkg=None, detail="", code=None, rejoin=None):
     if str(kind) in BUNDLE_KINDS:
         _LAST_ERROR["t"] = time.time()
     try:
-        _mascot_on_event(kind, detail)
-    except Exception:
-        pass
-    try:
         _maybe_bundle(str(kind), pkg, detail)
     except Exception:
         pass
@@ -578,134 +522,6 @@ BAN_TRACKER = {
     "pause_until": 0
 }
 
-
-
-# ==================== VISION AI - SCREEN ANALYSIS ====================
-VISION_AI_ENABLED = True
-VISION_CHECK_INTERVAL_SEC = 30  # Kiểm tra màn hình mỗi 30s
-VISION_MODEL = "claude-vision"  # hoặc local model
-VISION_ALERTS = {}  # {package: (alert_type, timestamp, description)}
-
-POPUP_PATTERNS = {
-    "trade": ["trade", "offer", "accept", "decline"],
-    "event": ["event", "limited", "reward", "seasonal"],
-    "maintenance": ["maintenance", "server", "updating", "downtime"],
-    "error": ["error", "fail", "problem", "crashed"],
-    "stuck": ["stuck", "wall", "terrain", "can't move"],
-}
-
-def analyze_screenshot_vision(pkg):
-    """Dùng Vision AI để phân tích ảnh màn hình game"""
-    if not VISION_AI_ENABLED:
-        return None
-
-    try:
-        import base64
-        import urllib.request
-        import json
-    except:
-        return None
-
-    # Chụp ảnh hiện tại
-    try:
-        img_data = sh(f"adb -s {get_device_id()} shell screencap -p /sdcard/pain_screen_temp.png && adb -s {get_device_id()} pull /sdcard/pain_screen_temp.png -", timeout=5)
-    except:
-        return None
-
-    if not img_data or len(img_data) < 1000:
-        return None
-
-    # Mã hóa base64 để gửi cho API
-    img_b64 = base64.b64encode(img_data).decode()
-
-    # Gọi Vision AI (ví dụ dùng Claude Vision hoặc Google Vision)
-    payload = {
-        "image": img_b64,
-        "analyses": [
-            "character_status",  # Nhân vật có bị kẹt không, HP, state
-            "popups",  # Phát hiện popup: trade, event, maintenance
-            "obstacles",  # Vật cản, địa hình
-            "game_ui",  # Giao diện game (lobby, map, etc)
-        ]
-    }
-
-    # Giả lập: trong thực tế gọi đến API Vision
-    result = {
-        "character_position": "unknown",
-        "is_stuck": False,
-        "popups": [],
-        "game_state": "playing",
-        "issues": []
-    }
-
-    try:
-        # Placeholder: gọi API Vision
-        # response = urllib.request.urlopen(...payload...)
-        # result = json.loads(response.read())
-        pass
-    except:
-        pass
-
-    return result
-
-def handle_vision_popup(pkg, popup_type):
-    """Tự động xử lý popup phát hiện bởi Vision AI"""
-    if popup_type == "trade":
-        # Tự động bấm Decline Trade
-        cmd = f"adb -s {get_device_id()} shell input tap 500 600"
-        sh(cmd, timeout=5)
-        msg_info(f"{tab_label(pkg)}: Đóng Trade popup")
-        log_event("VISION_POPUP", pkg, f"Closed trade popup auto")
-
-    elif popup_type == "event":
-        # Tự động close Event notification
-        sh(f"adb -s {get_device_id()} shell input tap 100 100", timeout=5)
-        msg_info(f"{tab_label(pkg)}: Đóng Event notification")
-        log_event("VISION_POPUP", pkg, f"Closed event popup auto")
-
-    elif popup_type == "maintenance":
-        # Phát hiện bảo trì - thông báo người dùng
-        msg_warn(f"{tab_label(pkg)}: Roblox đang bảo trì, tool tạm dừng")
-        log_event("VISION_ALERT", pkg, "Server maintenance detected")
-
-    elif popup_type == "stuck":
-        # Nhân vật bị kẹt - trigger rejoin
-        msg_err(f"{tab_label(pkg)}: Nhân vật bị kẹt vào địa hình, vào lại")
-        recover_tab(pkg, "vision_stuck")
-        log_event("VISION_STUCK", pkg, "Character stuck in terrain")
-
-def vision_screen_check(packages):
-    """Chạy Vision AI kiểm tra mỗi package"""
-    for pkg in packages:
-        if pkg not in VISION_ALERTS:
-            VISION_ALERTS[pkg] = (None, time.time(), "")
-
-        last_type, last_time, _ = VISION_ALERTS[pkg]
-
-        # Kiểm tra mỗi 30s
-        if time.time() - last_time < VISION_CHECK_INTERVAL_SEC:
-            continue
-
-        result = analyze_screenshot_vision(pkg)
-        if not result:
-            continue
-
-        # Phát hiện popup hoặc sự cố
-        if result.get("popups"):
-            for popup in result["popups"]:
-                if popup in POPUP_PATTERNS:
-                    VISION_ALERTS[pkg] = (popup, time.time(), str(result))
-                    handle_vision_popup(pkg, popup)
-
-        if result.get("is_stuck"):
-            VISION_ALERTS[pkg] = ("stuck", time.time(), str(result))
-            handle_vision_popup(pkg, "stuck")
-
-        # Ghi log phân tích
-        if result.get("issues"):
-            log_event("VISION_ANALYSIS", pkg, f"Issues: {', '.join(result['issues'])}")
-
-
 # ==================== SELECTED PACKAGES (User Choice) ====================
 SELECTED_PACKAGES = []
 SELECT_ALL_PACKAGES = True
@@ -759,7 +575,10 @@ def _parse_ver(v):
     return tuple(int(x) for x in m.group(1).split(".")) if m else None
 
 def fetch_latest_version():
-    out = run_cmd(["curl", "-s", "-m", "8", UPDATE_URL], timeout=12)
+    r = _fetch_isolated(UPDATE_URL, 4000, timeout=8)
+    if not r.get("ok"):
+        return None
+    out = (r.get("body") or "").strip()
     if not out or out.lstrip().startswith("<"):
         return None
     try:
@@ -1388,43 +1207,10 @@ def load_saved_config():
     MONITOR_ONLY = bool(data.get("monitor_only", MONITOR_ONLY))
     SCREEN_ARCHIVE.update(data.get("screen_archive", {}))
     ROBLOX_VERSIONS.update(data.get("app_versions", {}))
-    _ms = data.get("mascot", {})
-    if isinstance(_ms, dict):
-        if isinstance(_ms.get("enabled"), bool):
-            MASCOT["enabled"] = _ms["enabled"]
-        if isinstance(_ms.get("sound"), bool):
-            MASCOT["sound"] = _ms["sound"]
-        if _ms.get("character") in MASCOTS:
-            MASCOT["character"] = _ms["character"]
-        if _ms.get("skin") in SKINS:
-            MASCOT["skin"] = _ms["skin"]
-        if isinstance(_ms.get("char_uses"), dict):
-            MASCOT["char_uses"] = {k: int(v) for k, v in _ms["char_uses"].items() if k in MASCOTS and str(v).isdigit()}
-        if isinstance(_ms.get("costume"), dict):
-            MASCOT["costume"] = {k: str(v) for k, v in _ms["costume"].items() if k in MASCOTS}
-        if isinstance(_ms.get("name"), str):
-            MASCOT["name"] = _ms["name"].strip()[:16]
-        if isinstance(_ms.get("stats"), dict):
-            for k in ("rejoin_ok", "hop_ok", "guess_win"):
-                try:
-                    MASCOT["stats"][k] = int(_ms["stats"].get(k, 0))
-                except Exception:
-                    pass
-        if isinstance(_ms.get("sessions"), int):
-            MASCOT["sessions"] = _ms["sessions"]
-        if isinstance(_ms.get("last_seen"), str):
-            MASCOT["last_seen"] = _ms["last_seen"]
-        MASCOT["used_afk"] = bool(_ms.get("used_afk", MASCOT.get("used_afk", False)))
-        MASCOT["used_music"] = bool(_ms.get("used_music", MASCOT.get("used_music", False)))
     _ai = data.get("ai_settings", {})
     if isinstance(_ai, dict):
         AI_SETTINGS["analysis"] = bool(_ai.get("analysis", True))
         pass  # chế độ cố định là phân tích kỹ
-    _hb = data.get("habits", {})
-    if isinstance(_hb, dict):
-        for part in ("menu", "hours"):
-            if isinstance(_hb.get(part), dict):
-                HABITS[part] = {str(k): int(v) for k, v in _hb[part].items() if str(v).isdigit()}
     _mt = data.get("music_timer", {})
     if isinstance(_mt, dict):
         MUSIC_TIMER["enabled"] = bool(_mt.get("enabled", False))
@@ -1591,8 +1377,6 @@ def _build_config_dict():
             "package_games": PACKAGE_GAMES,
             "anti_afk": ANTI_AFK,
             "music_timer": MUSIC_TIMER,
-            "mascot": MASCOT,
-            "habits": HABITS,
             "ai_settings": AI_SETTINGS,
             # API key không được lưu
             # "ai_api_key": AI_API_KEY,
@@ -1725,40 +1509,11 @@ def dot(state):
     color = C.GRN if state else (C.RED if state is False else C.YEL)
     return f"{color}●{C.R}"
 
-_CAMEO_STATE = {"last": 0.0}
-CAMEO_GAP_SEC = 5        # khoảng cách tối thiểu giữa hai lần linh vật xuất hiện
-CAMEO_PAUSE_SEC = 0.5    # dừng ngắn để kịp nhìn động tác (0 để tắt)
-
-def _mascot_cameo():
-    """Khi vào một màn hình, linh vật leo lên rồi rơi xuống kèm một câu ngắn."""
-    if not MASCOT.get("enabled"):
-        return
-    now = time.time()
-    if now - _CAMEO_STATE["last"] < CAMEO_GAP_SEC:
-        return
-    _CAMEO_STATE["last"] = now
-    import random
-    key = MASCOT.get("character", "meo")
-    char = MASCOTS.get(key, MASCOTS["meo"])
-    options = BEHAVIORS.get(key, []) or [{"tip": "Mình ghé thăm chút nhé!"}]
-    beh = random.choice(options)
-    prop = beh.get("prop_above") or beh.get("prop_below") or "   ~ ~ ~  "
-    name = _mascot_display_name()
-    print(f"   {C.LPUR}{prop}{C.R}  {C.GRY}{name} leo lên...{C.R}")
-    print(f"   {C.LPUR}{char['tpl'][0].replace('{w}', WING_UP) if char.get('wings') else char['tpl'][0]}{C.R}")
-    print(f"   {C.GRY}↓ rơi xuống! {beh.get('tip', '')}{C.R}")
-    if CAMEO_PAUSE_SEC > 0 and sys.stdin.isatty():
-        time.sleep(CAMEO_PAUSE_SEC)
-
 def section_title(title):
     w = ui_width()
     print()
     print(f" {C.PUR}▌{C.R}{C.WHT} {title}{C.R}")
     print(f" {C.GRY}{'─' * (w - 2)}{C.R}")
-    try:
-        _mascot_cameo()
-    except Exception:
-        pass
 
 def msg_ok(text):
     print(f"{C.GRN}[+] {text}{C.R}")
@@ -3724,12 +3479,6 @@ def wait_with_stop_check(seconds, message=""):
 
 def update_ban_tracker(error_code=None, rejoin_failed=False, cookie_changed=False):
     """Update ban tracking metrics - phát hiện mẫu bị ban"""
-    # Anti-ban wave detection
-    if error_code and ANTIBAN_ENABLED:
-        record_error_for_wave_analysis(error_code, "")
-    if rejoin_failed and ANTIBAN_ENABLED:
-        record_error_for_wave_analysis("rejoin_fail", "")
-    """Update ban tracking metrics - phát hiện mẫu bị ban"""
     global BAN_TRACKER
     
     current_time = time.time()
@@ -3779,120 +3528,6 @@ def update_ban_tracker(error_code=None, rejoin_failed=False, cookie_changed=Fals
         BAN_TRACKER["is_paused"] = True
         BAN_TRACKER["pause_until"] = current_time + 300
         BAN_TRACKER["ban_warning"] = f"AUTO PAUSE: Ban risk {BAN_TRACKER['ban_risk_percent']}% - Tạm dừng 5 phút"
-
-
-# ==================== ANTI-BAN AI - PATTERN DETECTION ====================
-ANTIBAN_ENABLED = True
-BAN_WAVE_CHECK_INTERVAL = 60  # Kiểm tra pattern mỗi 60s
-BAN_WAVE_THRESHOLD = 5  # Nếu 5+ lỗi 262 trong 5 phút = wave ban
-BAN_WAVE_PAUSE_DURATION = 3600  # Dừng 1 giờ khi phát hiện wave
-BAN_PATTERN_HISTORY = []  # [(timestamp, error_type, pkg)]
-BAN_WAVE_ACTIVE = False
-BAN_WAVE_UNTIL = 0
-
-def detect_ban_wave():
-    """Phân tích pattern lỗi: phát hiện nếu có wave ban từ Roblox"""
-    global BAN_WAVE_ACTIVE, BAN_WAVE_UNTIL
-
-    if not ANTIBAN_ENABLED:
-        return False
-
-    now = time.time()
-
-    # Lấy lỗi trong 5 phút gần đây
-    recent_errors = [
-        (ts, error_type) for ts, error_type, _ in BAN_PATTERN_HISTORY
-        if now - ts <= 300
-    ]
-
-    # Đếm error 262 (Kicked/Crashed)
-    error_262_count = sum(1 for _, e in recent_errors if e == 262)
-    rejoin_fail_count = sum(1 for _, e in recent_errors if e == "rejoin_fail")
-
-    # Pattern 1: 5+ lỗi 262 trong 5 phút = wave ban
-    if error_262_count >= BAN_WAVE_THRESHOLD:
-        msg_err(f"🚨 PHÁT HIỆN WAVE BAN: {error_262_count} x Error 262 trong 5 phút. Tự dừng {BAN_WAVE_PAUSE_DURATION//3600} giờ.")
-        BAN_WAVE_ACTIVE = True
-        BAN_WAVE_UNTIL = now + BAN_WAVE_PAUSE_DURATION
-        return True
-
-    # Pattern 2: Tỷ lệ rejoin thất bại tăng đột biến (>70%)
-    if len(recent_errors) >= 3:
-        fail_ratio = rejoin_fail_count / len(recent_errors)
-        if fail_ratio > 0.7 and rejoin_fail_count >= 3:
-            msg_err(f"⚠️ CẢNH BÁO WAVE BAN: {rejoin_fail_count}/{len(recent_errors)} rejoin thất bại ({fail_ratio*100:.0f}%). Tạm dừng.")
-            BAN_WAVE_ACTIVE = True
-            BAN_WAVE_UNTIL = now + 1800  # 30 phút
-            return True
-
-    # Pattern 3: Nhiều package bị lỗi đồng thời (4+ tabs trong 1 phút)
-    same_minute = [
-        ts for ts, _, _ in BAN_PATTERN_HISTORY
-        if now - ts <= 60
-    ]
-    if len(same_minute) >= 4:
-        msg_err(f"⚠️ CẢNH BÁO WAVE BAN: {len(same_minute)} packages lỗi trong 1 phút. Tạm dừng 30 phút.")
-        BAN_WAVE_ACTIVE = True
-        BAN_WAVE_UNTIL = now + 1800
-        return True
-
-    return False
-
-def record_error_for_wave_analysis(error_code, pkg):
-    """Ghi nhận lỗi để phân tích pattern wave ban"""
-    BAN_PATTERN_HISTORY.append((time.time(), error_code, pkg))
-
-    # Giữ lịch sử 10 phút
-    cutoff = time.time() - 600
-    BAN_PATTERN_HISTORY[:] = [
-        (ts, code, p) for ts, code, p in BAN_PATTERN_HISTORY
-        if ts > cutoff
-    ]
-
-    # Kiểm tra wave ban
-    detect_ban_wave()
-
-def antiban_wave_check(packages):
-    """Kiểm tra wave ban định kỳ"""
-    global BAN_WAVE_ACTIVE, BAN_WAVE_UNTIL
-
-    if not ANTIBAN_ENABLED:
-        return
-
-    now = time.time()
-
-    # Nếu đang trong chế độ wave pause
-    if BAN_WAVE_ACTIVE and now < BAN_WAVE_UNTIL:
-        remain = BAN_WAVE_UNTIL - now
-        if int(remain) % 60 == 0:  # Thông báo mỗi phút
-            print(f"{C.RED}[!] WAVE BAN PAUSE: Còn {remain//60:.0f} phút. Tất cả tab sẽ tạm dừng.{C.R}")
-        return
-
-    # Hết wave pause
-    if BAN_WAVE_ACTIVE and now >= BAN_WAVE_UNTIL:
-        BAN_WAVE_ACTIVE = False
-        msg_done("Wave ban pause kết thúc. Tool sẽ tiếp tục hoạt động.")
-        log_event("ANTIBAN", detail="Wave ban pause ended, resuming")
-
-    # Kiểm tra pattern định kỳ
-    detect_ban_wave()
-
-def antiban_safe_disconnect(packages):
-    """An toàn ngắt kết nối khi phát hiện wave ban"""
-    if not BAN_WAVE_ACTIVE:
-        return
-
-    print(f"{C.RED}[!] Ngắt kết nối an toàn để tránh ban hàng loạt...{C.R}")
-    for pkg in packages:
-        try:
-            close_game(pkg)
-            log_event("ANTIBAN_DISCONNECT", pkg, "Safe disconnect during wave ban")
-        except:
-            pass
-
-    msg_warn(f"Tất cả {len(packages)} tab đã được tắt. Sẽ mở lại sau {(BAN_WAVE_UNTIL - time.time())//60:.0f} phút.")
-
-
 
 def check_ban_status():
     """Check và display ban status - hiển thị trạng thái hiện tại"""
@@ -4406,11 +4041,7 @@ def start_tool():
                 last_key_save = time.time()
                 key_autosave(packages)
 
-            
-            if VISION_AI_ENABLED and not stop_start:
-                vision_screen_check(packages)
-
-if not stop_start and (time.time() - last_ram_check) >= 30:
+            if not stop_start and (time.time() - last_ram_check) >= 30:
                 last_ram_check = time.time()
                 check_low_ram(packages)
 
@@ -4860,758 +4491,6 @@ def restore_screen_after_run():
     return None
 
 
-# ==================== LINH VẬT (MASCOT) ====================
-MASCOT = {"enabled": True, "sound": False, "character": "meo", "skin": "thuong", "sessions": 0, "last_seen": "",
-          "used_afk": False, "used_music": False,
-          "stats": {"rejoin_ok": 0, "hop_ok": 0, "guess_win": 0}}
-_MASCOT_STATE = {"frame": 0, "mood": "idle", "mood_until": 0.0, "tip": None, "fall": False, "counted": False}
-
-MOOD_FACES = {
-    "idle": "^.^", "happy": "^o^", "love": "♥.♥", "excited": "\\o/",
-    "angry": ">:<", "sad": ";_;", "crying": "T_T", "sleepy": "-_-", "scared": "O_O",
-}
-
-# Nhân vật: ai cũng chọn được, không cần mở khóa
-MASCOTS = {
-    "meo":   {"name": "Mèo Mochi", "tpl": [" /\\_/\\ ", "( {f} )", " > ^ < "]},
-    "tho":   {"name": "Thỏ Bông",  "tpl": [" (\\_/) ", "( {f} )", " (\")(\") "]},
-    "robot": {"name": "Robo Bíp",  "tpl": ["  ___  ", "[ {f} ]", " /|_|\\ "]},
-    "ma":    {"name": "Ma Nhỏ",    "tpl": ["  .-.  ", "({f})", " |~~~| "]},
-    "cao":   {"name": "Cáo Nhỏ",   "tpl": [" ^   ^ ", "( {f} )", " /   \\ "]},
-    "rong":  {"name": "Rồng Mini", "wings": True, "tpl": ["{w}", "<( {f} )>", " /    \\  ", " ~~~~~~ "]},
-    "cho":   {"name": "Chó Đốm",   "tpl": [" /^  ^\\ ", "( {f} )", "  U  U  "]},
-    "gau":   {"name": "Gấu Trúc",  "tpl": ["  (o)(o) ", "( {f} )", "  (  )  "]},
-    "se":    {"name": "Chim Sẻ",   "wings": True, "tpl": ["{w}", "  ({f})", "  /\\   "]},
-    "ech":   {"name": "Ếch Xanh",  "tpl": ["  @..@  ", "( {f} )", " /    \\ "]},
-    "cu":    {"name": "Cú Mèo",    "wings": True, "tpl": ["{w}", "(({f}))", "  VV   "]},
-    "khi":   {"name": "Khỉ Nghịch", "tpl": ["  ..    ", "({f})", " /| |\\ "]},
-    "rua":   {"name": "Rùa Con",   "tpl": [" .-----. ", "/ {f} \\", "'-----' "]},
-    "doi":   {"name": "Dơi Nhỏ",   "wings": True, "tpl": ["{w}", " /({f})\\ ", "  V V   "]},
-    "slime": {"name": "Slime Xanh", "tpl": ["  ____  ", " ({f}) ", " ~~~~~~ "]},
-}
-
-# Hành động đời thực khi linh vật rảnh. prop_above/prop_below là vật thể phụ, shift là bật/nhún.
-BEHAVIORS = {
-    "meo": [
-        {"name": "leo", "steps": 3, "prop_above": r"   |   |   ", "shift": "up",
-         "tip": "Mèo leo lên tường rồi! Cẩn thận nha."},
-        {"name": "phá đồ", "steps": 2, "prop_above": "   ▯      ",
-         "tip": "Ối! Mình làm rơi cái ly rồi, hì hì."},
-        {"name": "liếm lông", "steps": 3, "face": "sleepy", "prop_below": "   ~ ~ ~  ",
-         "tip": "Mèo đang liếm lông cho sạch sẽ."},
-        {"name": "rượt đuôi", "steps": 3, "prop_below": "  ◦◦◦   ",
-         "tip": "Mèo rượt đuôi kìa, vòng vòng mãi!"},
-        {"name": "ngủ gật", "steps": 2, "face": "sleepy", "prop_above": "    z z   ",
-         "tip": "Zzz... mèo ngủ gật rồi."},
-    ],
-    "tho": [
-        {"name": "nhảy", "steps": 2, "shift": "up", "tip": "Bật nhảy! Vui quá đi."},
-        {"name": "ăn cà rốt", "steps": 3, "prop_below": r"  ._/\.   ",
-         "tip": "Nhai nhóp nhép, cà rốt ngon ghê!"},
-        {"name": "vểnh tai", "steps": 2, "prop_above": r"   / \    ",
-         "tip": "Nghe có tiếng gì đó... hí hí."},
-    ],
-    "robot": [
-        {"name": "quét mắt", "steps": 3, "prop_above": "  ~~~~    ",
-         "tip": "Đang quét xung quanh... bíp!"},
-        {"name": "lăn bánh", "steps": 2, "prop_below": "  (o)(o)  ",
-         "tip": "Lăn bánh đi chơi nè!"},
-        {"name": "khởi động", "steps": 2, "face": "excited", "prop_above": "   *  *    ",
-         "tip": "Hệ thống khởi động xong, sẵn sàng!"},
-    ],
-    "ma": [
-        {"name": "lơ lửng", "steps": 3, "shift": "up", "prop_below": "  ~ ~ ~   ",
-         "tip": "Hu hu, mình bay lơ lửng nè."},
-        {"name": "trốn", "steps": 2, "face": "scared", "prop_above": "   ?      ",
-         "tip": "Bu! Có làm bạn giật mình không?"},
-    ],
-    "cao": [
-        {"name": "ngửi đất", "steps": 3, "prop_below": "  .~~.    ",
-         "tip": "Ngửi ngửi... có mùi thơm gì đó."},
-        {"name": "nhún", "steps": 2, "shift": "up", "tip": "Hí! Nhảy cao quá."},
-        {"name": "rình mồi", "steps": 3, "prop_above": r"    \ /    ",
-         "tip": "Suỵt... mình đang rình con bướm."},
-    ],
-    "cho": [
-        {"name": "vẫy đuôi", "steps": 3, "prop_above": "        ~    ",
-         "tip": "Vẫy đuôi quên cả trời đất! Gâu gâu!"},
-        {"name": "đào đất", "steps": 3, "prop_below": "  ..:..    ",
-         "tip": "Đào đất tìm xương chôn từ hôm qua."},
-        {"name": "chạy quanh", "steps": 2, "shift": "up", "tip": "Chạy vòng vòng nè, theo mình nào!"},
-    ],
-    "gau": [
-        {"name": "ăn tre", "steps": 3, "prop_below": "  |||||    ",
-         "tip": "Tre ngon quá, nhai nhóp nhép!"},
-        {"name": "lăn tròn", "steps": 2, "shift": "up", "tip": "Lăn tròn cho đã nào!"},
-        {"name": "ngủ trưa", "steps": 3, "face": "sleepy", "prop_above": "    z z   ",
-         "tip": "Zzz... gấu trúc ngủ trưa rồi."},
-    ],
-    "se": [
-        {"name": "nhảy cành", "steps": 2, "shift": "up", "tip": "Nhảy cành cây, vui quá!"},
-        {"name": "hót", "steps": 2, "prop_above": "   ~ tíu ~  ",
-         "tip": "Tíu tíu! Chim sẻ đang hót."},
-        {"name": "rỉa lông", "steps": 3, "face": "sleepy", "prop_below": "   ~ ~      ",
-         "tip": "Rỉa lông cho bóng mượt."},
-    ],
-    "ech": [
-        {"name": "nhảy", "steps": 2, "shift": "up", "tip": "Ộp ộp! Nhảy thật xa nè."},
-        {"name": "bắt ruồi", "steps": 2, "prop_above": "      ~~>  ",
-         "tip": "Lưỡi phóng ra, bắt được rồi!"},
-        {"name": "ngồi chơi", "steps": 3, "face": "idle", "prop_below": "  ~~~~~~   ",
-         "tip": "Ngồi ao chơi, mát ghê."},
-    ],
-    "cu": [
-        {"name": "xoay đầu", "steps": 3, "prop_above": "   o o o    ",
-         "tip": "Xoay đầu 180 độ mà không chóng mặt đâu nha!"},
-        {"name": "đậu cành", "steps": 3, "face": "sleepy", "prop_below": "  ===========",
-         "tip": "Đậu trên cành ngắm trăng, yên tĩnh ghê."},
-        {"name": "bay vụt", "steps": 2, "shift": "up", "tip": "Vút! Bay qua đầu bạn rồi."},
-    ],
-    "khi": [
-        {"name": "leo cây", "steps": 3, "prop_above": "  |  |  |  ", "shift": "up",
-         "tip": "Leo lên cây hái chuối đi nào!"},
-        {"name": "ném chuối", "steps": 2, "prop_below": "  ) (  ",
-         "tip": "Ném chuối vào bạn nè, hì hì!"},
-        {"name": "gãi đầu", "steps": 2, "face": "scared", "prop_above": "   ??     ",
-         "tip": "Gãi đầu nghĩ mãi không ra..."},
-    ],
-    "rua": [
-        {"name": "thụt đầu", "steps": 2, "face": "scared", "prop_above": "   ...    ",
-         "tip": "Sợ quá, mình rụt cổ vào mai!"},
-        {"name": "bò chậm", "steps": 3, "shift": "down", "tip": "Bò chậm thôi, không vội đâu."},
-        {"name": "phơi nắng", "steps": 3, "prop_above": r"    \|/    ",
-         "tip": "Phơi nắng ấm quá, ngủ luôn cũng được."},
-    ],
-    "doi": [
-        {"name": "treo ngược", "steps": 3, "face": "sleepy", "prop_below": "   |  |    ",
-         "tip": "Treo ngược ngủ cho khỏe, đừng đánh thức mình."},
-        {"name": "bay vòng", "steps": 2, "shift": "up", "tip": "Bay vòng vòng trong đêm nè!"},
-        {"name": "bắt côn trùng", "steps": 2, "prop_above": "   *  *   ",
-         "tip": "Bắt được con muỗi rồi, ngon ghê!"},
-    ],
-    "slime": [
-        {"name": "nảy", "steps": 2, "shift": "up", "tip": "Boing! Nảy lên nảy xuống!"},
-        {"name": "co giãn", "steps": 3, "prop_below": "  ~~~~~~  ",
-         "tip": "Co giãn cho khỏe người nè."},
-        {"name": "chảy xuống", "steps": 3, "shift": "down",
-         "tip": "Chảy xuống rồi... từ từ phục hồi thôi."},
-    ],
-    "rong": [
-        {"name": "phun lửa", "steps": 2, "prop_above": "  ~~~~>   ",
-         "tip": "Phụt! Lửa nhỏ thôi nha."},
-        {"name": "cuộn ngủ", "steps": 3, "face": "sleepy", "prop_below": "  ~~~@~~  ",
-         "tip": "Rồng cuộn tròn ngủ rồi..."},
-    ],
-}
-
-_BEHAVIOR_STATE = {"cur": None, "left": 0, "tip": None}
-
-def _time_behaviors():
-    """Hành động thêm theo giờ: khuya thì ngáp, sáng thì vươn vai."""
-    h = datetime.now().hour
-    if h >= 22 or h < 5:
-        return [{"name": "ngáp", "steps": 2, "face": "sleepy", "prop_above": "    o      ",
-                 "tip": "Ngáp... khuya rồi, đi ngủ sớm nha."}]
-    if 5 <= h < 9:
-        return [{"name": "vươn vai", "steps": 2, "shift": "up",
-                 "tip": "Chào buổi sáng! Vươn vai cái đã."}]
-    return []
-
-def _behavior_tick(mood):
-    """Chọn và chạy một hành động đời thực khi linh vật ở trạng thái bình thường."""
-    import random
-    st = _BEHAVIOR_STATE
-    if mood != "idle":
-        st["cur"], st["tip"] = None, None
-        return None
-    if st["cur"] is None:
-        options = BEHAVIORS.get(MASCOT.get("character"), []) + _time_behaviors()
-        if not options or random.random() >= 0.35:
-            st["tip"] = None
-            return None
-        st["cur"] = random.choice(options)
-        st["left"] = st["cur"].get("steps", 2)
-    beh = st["cur"]
-    st["tip"] = beh.get("tip")
-    st["left"] -= 1
-    if st["left"] <= 0:
-        st["cur"] = None
-    return beh
-
-# Skin = hiệu ứng trang trí, dùng cho mọi nhân vật. Điểm càng cao, hiệu ứng càng đẹp.
-SKINS = {
-    "thuong":     {"name": "Thường",     "points": 0,  "desc": "Mặc định"},
-    "lapla":      {"name": "Lấp lánh",   "points": 3,  "desc": "Có ánh sao quanh đầu"},
-    "suthi":      {"name": "Sử thi",     "points": 6,  "desc": "Đổi màu theo khung hình, có sao hai bên"},
-    "huyenthoai": {"name": "Huyền thoại", "points": 9, "desc": "Vương miện cầu vồng, sao lấp lánh hai bên"},
-}
-
-# Nhiệm vụ: (mã, mô tả, điểm, hàm kiểm tra tiến độ -> (xong, tiến_độ_chuỗi))
-def _mission_list():
-    st = MASCOT.get("stats", {})
-    sess = int(MASCOT.get("sessions", 0))
-    def progress(cur, goal):
-        return (cur >= goal, f"{min(cur, goal)}/{goal}")
-    return [
-        ("open3", "Mở tool 3 lần", 1, progress(sess, 3)),
-        ("open10", "Mở tool 10 lần", 2, progress(sess, 10)),
-        ("open30", "Mở tool 30 lần", 3, progress(sess, 30)),
-        ("afk", "Bật Anti-AFK", 1, (bool(MASCOT.get("used_afk")), "xong" if MASCOT.get("used_afk") else "chưa")),
-        ("music", "Nghe nhạc YouTube", 1, (bool(MASCOT.get("used_music")), "xong" if MASCOT.get("used_music") else "chưa")),
-        ("hop5", "Đổi server thành công 5 lần", 2, progress(int(st.get("hop_ok", 0)), 5)),
-        ("rejoin20", "Vào map thành công 20 lần", 2, progress(int(st.get("rejoin_ok", 0)), 20)),
-        ("guess1", "Thắng đoán số lần đầu", 1, progress(int(st.get("guess_win", 0)), 1)),
-        ("guess5", "Thắng đoán số 5 lần", 2, progress(int(st.get("guess_win", 0)), 5)),
-    ]
-
-def _mascot_display_name():
-    custom = str(MASCOT.get("name", "") or "").strip()
-    if custom:
-        return custom
-    return MASCOTS.get(MASCOT.get("character"), MASCOTS["meo"])["name"]
-
-def _mascot_points():
-    return sum(points for _, _, points, (done, _) in _mission_list() if done)
-
-def _skin_unlocked(key):
-    return _mascot_points() >= SKINS.get(key, {}).get("points", 0)
-
-# Mỗi nhân vật có 2 trang phục. Mở khi đã dùng đúng nhân vật đó đủ số lần.
-COSTUME_DATA = {
-    "meo": (("Nơ hồng", "   @@       "), ("Mũ phù thủy", r"   /^\    ")),
-    "tho": (("Vòng hoa", "  ✿  ✿  ✿  "), ("Nón lá", "   ____    ")),
-    "robot": (("Anten sáng", "    ^ ^    "), ("Mũ sắt", "   [=====]  ")),
-    "ma": (("Khăn đỏ", "  ~~~~~~   "), ("Vương miện ma", "  ^ ^ ^    ")),
-    "cao": (("Nơ xanh", "  @@       "), ("Mũ rơm", "   ____    ")),
-    "rong": (("Vương miện", "  ♛ ♛ ♛   "), ("Đá quý", "  ◆ ◆ ◆   ")),
-    "cho": (("Vòng cổ hoa", "  ✿ ✿ ✿ "), ("Mũ đầu bếp", "   ___    ")),
-    "gau": (("Nơ tre", "  ~ ~ ~    "), ("Khăn quàng", "  ==== ==  ")),
-    "se": (("Lông mào", "   ^^^     "), ("Nơ đỏ", "   @@      ")),
-    "ech": (("Mũ lá sen", "  ___     "), ("Bong bóng", "   o  o    ")),
-    "cu": (("Nơ bướm", "   <>      "), ("Mũ sao", "   * * *   ")),
-    "khi": (("Băng đô", "  ==========  "), ("Nón chuối", "   ~~~~~   ")),
-    "rua": (("Hoa trên mai", "  ✿   ✿   "), ("Mũ nấm", "   ____    ")),
-    "doi": (("Nơ đen", "   <>      "), ("Vương miện bạc", "  ^^^^^^    ")),
-    "slime": (("Vương miện nhỏ", "  ^ ^ ^    "), ("Hoa bụi", "  * * *    ")),
-}
-COSTUME_NEEDS = (5, 15)
-
-def _costumes_for(char):
-    out = []
-    for i, (name, row) in enumerate(COSTUME_DATA.get(char, ()), 1):
-        need = COSTUME_NEEDS[i - 1]
-        uses = int(MASCOT.get("char_uses", {}).get(char, 0))
-        out.append({"key": f"c{i}", "name": name, "row": row, "need": need, "unlocked": uses >= need, "uses": uses})
-    return out
-
-def _current_costume():
-    char = MASCOT.get("character")
-    key = (MASCOT.get("costume") or {}).get(char, "")
-    for c in _costumes_for(char):
-        if c["key"] == key and c["unlocked"]:
-            return c["row"]
-    return None
-
-def _season_prop():
-    """Trang phục theo mùa hoặc sự kiện, tự bật theo ngày. Trả về một dòng hoặc None."""
-    d = datetime.now()
-    md = (d.month, d.day)
-    if (10, 20) <= md <= (10, 31):
-        return r"   /^\    "   # mũ Halloween
-    if (12, 15) <= md <= (12, 31):
-        return "  *  *  *  "       # sao Giáng sinh
-    if (1, 20) <= md <= (2, 20):
-        return "  ~*~ ~*~  "       # trang trí Tết
-    if (6, 1) <= md <= (8, 31):
-        return " [=]  [=]  "       # kính râm mùa hè
-    return None
-
-def _current_skin():
-    key = MASCOT.get("skin", "thuong")
-    return key if key in SKINS and _skin_unlocked(key) else "thuong"
-
-# Mood và sự kiện
-_MOOD_EVENTS = {
-    "REJOIN_OK": ("happy", "Yay! Vào map thành công rồi!"),
-    "HOP": ("happy", "Đổi server xong, mượt hơn chưa?"),
-    "HOP_FAIL": ("sad", "Đổi server thất bại... buồn quá."),
-    "CRASH": ("crying", "Ui, có tab bị crash. Mình buồn quá."),
-    "FREEZE": ("sad", "Có tab bị treo rồi..."),
-    "JOIN_ERR": ("sad", "Vào map lỗi, thử lại nhé."),
-    "ERROR": ("sad", "Có lỗi xảy ra, bạn xem log giúp mình."),
-    "LICENSE": ("angry", "Ai vừa bắt mình tắt vậy?! Hừ!"),
-    "VIP_EXPIRED": ("angry", "Link VIP hết hạn rồi, hừ!"),
-    "LOW_RAM": ("scared", "RAM thấp quá, mình sợ!"),
-    "MUSIC": ("excited", "Nhạc vui quá, mình nhảy nè!"),
-    "ANTI_AFK": ("happy", "Vuốt nhẹ xong, không ai đuổi bạn đâu!"),
-    "STOP": ("sleepy", "Dừng rồi nha, mình ngủ chút..."),
-    "NET_DOWN": ("sad", "Mất mạng rồi..."),
-    "NET_UP": ("happy", "Có mạng lại rồi!"),
-}
-
-def _set_mood(mood, secs=120, tip=None):
-    _MASCOT_STATE.update(mood=mood, mood_until=time.time() + secs, tip=tip)
-    if mood in _LIFT_FOR_MOOD:
-        _MASCOT_STATE["lift"] = (_LIFT_FOR_MOOD[mood], 2)
-
-def _current_mood():
-    if time.time() > _MASCOT_STATE.get("mood_until", 0):
-        return "idle"
-    return _MASCOT_STATE.get("mood", "idle")
-
-_BUBBLE_STATE = {"last": 0.0}
-
-def _mascot_count(key, n=1):
-    st = MASCOT.setdefault("stats", {})
-    st[key] = int(st.get(key, 0)) + n
-
-# ----- Âm thanh linh vật: tiếng tổng hợp đơn giản, mặc định tắt -----
-MASCOT_SOUND_DIR = os.path.join(os.path.expanduser("~"), ".pain_mascot_sounds")
-MASCOT_SOUND_GAP = 20          # giây tối thiểu giữa hai tiếng
-_MSND_STATE = {"last": 0.0, "proc": None}
-_MSND_TONES = {
-    "ok": [(660, 0.12), (880, 0.16)],
-    "err": [(220, 0.18), (180, 0.22)],
-    "info": [(740, 0.10)],
-}
-_MSND_FOR_MOOD = {"happy": "ok", "excited": "ok", "love": "ok",
-                  "angry": "err", "sad": "err", "crying": "err", "scared": "err",
-                  "sleepy": "info"}
-
-def _mascot_sound_files():
-    import wave, struct, math
-    os.makedirs(MASCOT_SOUND_DIR, exist_ok=True)
-    rate = 22050
-    for name, tones in _MSND_TONES.items():
-        path = os.path.join(MASCOT_SOUND_DIR, name + ".wav")
-        if os.path.exists(path):
-            continue
-        frames = bytearray()
-        for freq, dur in tones:
-            n = int(rate * dur)
-            for i in range(n):
-                fade = min(1.0, i / (rate * 0.01), (n - i) / (rate * 0.01))
-                frames += struct.pack("<h", int(9000 * fade * math.sin(2 * math.pi * freq * i / rate)))
-        with wave.open(path, "wb") as w:
-            w.setnchannels(1)
-            w.setsampwidth(2)
-            w.setframerate(rate)
-            w.writeframes(bytes(frames))
-
-def _mascot_play_mood(mood, force=False):
-    """Phát tiếng ứng với cảm xúc, nếu đang bật và đã qua khoảng nghỉ."""
-    import subprocess
-    if not MASCOT.get("sound") and not force:
-        return False
-    name = _MSND_FOR_MOOD.get(mood)
-    if not name:
-        return False
-    now = time.time()
-    if not force and now - _MSND_STATE["last"] < MASCOT_SOUND_GAP:
-        return False
-    if shutil.which("mpv"):
-        cmd = ["mpv", "--no-video", "--really-quiet"]
-    elif shutil.which("termux-media-player"):
-        cmd = ["termux-media-player", "play"]
-    else:
-        return False
-    try:
-        _mascot_sound_files()
-        old = _MSND_STATE.get("proc")
-        if old is not None and old.poll() is None:
-            old.terminate()
-        _MSND_STATE["proc"] = subprocess.Popen(cmd + [os.path.join(MASCOT_SOUND_DIR, name + ".wav")],
-                                               stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                               stderr=subprocess.DEVNULL, start_new_session=True)
-        _MSND_STATE["last"] = now
-        return True
-    except Exception:
-        return False
-
-def _mascot_on_event(kind, detail=""):
-    """Gọi từ log_event: đếm nhiệm vụ, đổi cảm xúc và nói một dòng ngắn trong nhật ký."""
-    kind = str(kind)
-    if kind == "REJOIN_OK":
-        _mascot_count("rejoin_ok")
-    elif kind == "HOP":
-        _mascot_count("hop_ok")
-    hit = _MOOD_EVENTS.get(kind)
-    if not hit or not MASCOT.get("enabled"):
-        return
-    _set_mood(hit[0], 120, hit[1])
-    try:
-        _mascot_play_mood(hit[0])
-    except Exception:
-        pass
-    now = time.time()
-    if now - _BUBBLE_STATE["last"] < 20:
-        return
-    _BUBBLE_STATE["last"] = now
-    try:
-        sys.stdout.write(f"\n {C.LPUR}» {_mascot_display_name()}:{C.R} {C.WHT}{hit[1]}{C.R}\n")
-        sys.stdout.flush()
-    except Exception:
-        pass
-
-def _time_greeting():
-    h = datetime.now().hour
-    if 5 <= h < 11:
-        return "Chào buổi sáng! Hôm nay chơi gì nào?"
-    if 11 <= h < 14:
-        return "Trưa rồi, nghỉ tay chút nhé!"
-    if 14 <= h < 18:
-        return "Buổi chiều vui nha!"
-    if 18 <= h < 22:
-        return "Tối rồi, chúc bạn chơi vui!"
-    return "Khuya rồi, nhớ ngủ sớm nha!"
-
-HABITS = {"menu": {}, "hours": {}}   # số lần mở từng mục menu, và số lần dùng theo giờ
-
-def _habit_record(choice):
-    """Ghi nhận một lần mở mục menu chính. Chỉ lưu trên máy."""
-    HABITS["menu"][str(choice)] = int(HABITS["menu"].get(str(choice), 0)) + 1
-    h = str(datetime.now().hour)
-    HABITS["hours"][h] = int(HABITS["hours"].get(h, 0)) + 1
-    try:
-        save_config_file()
-    except Exception:
-        pass
-
-def _habit_top_menu():
-    items = [(int(k), v) for k, v in HABITS["menu"].items() if str(k).isdigit() and int(k) not in (0,)]
-    if not items:
-        return None, 0
-    key, count = max(items, key=lambda kv: kv[1])
-    return str(key), count
-
-def _habit_peak_hour():
-    if not HABITS["hours"]:
-        return None, 0
-    h, count = max(((int(k), v) for k, v in HABITS["hours"].items()), key=lambda kv: kv[1])
-    return h, count
-
-def _habit_tip():
-    """Lời gợi ý của linh vật dựa trên thói quen. Trả về chuỗi hoặc None."""
-    key, count = _habit_top_menu()
-    if key and count >= 8 and key not in ("1", "2"):
-        name = MENU_NAMES.get(key, "mục này")
-        return f"Bạn hay mở mục {key} ({name}), {count} lần rồi. Sau này mình sẽ giúp bạn đưa nó lên đầu menu nhé!"
-    hour, hcount = _habit_peak_hour()
-    if hour is not None and hcount >= 8 and (hour >= 22 or hour < 5):
-        return f"Bạn thường dùng tool khoảng {hour}h đêm. Nhớ nghỉ ngơi nhé!"
-    return None
-
-def _mascot_tip():
-    import random
-    if _MASCOT_STATE.get("tip") and _current_mood() != "idle":
-        return _MASCOT_STATE["tip"]
-    if _BEHAVIOR_STATE.get("tip") and _current_mood() == "idle":
-        return _BEHAVIOR_STATE["tip"]
-    if _current_mood() == "idle" and random.random() < 0.3:
-        habit = _habit_tip()
-        if habit:
-            return habit
-    last = MASCOT.get("last_seen", "")
-    if last:
-        try:
-            if (datetime.now() - datetime.strptime(last, "%Y-%m-%d")).days >= 3:
-                return "Lâu quá không thấy bạn, mình đói rồi..."
-        except Exception:
-            pass
-    if not TARGET_LINK:
-        return "Chưa chọn game. Vào Set up mục 2 để chọn game nhé!"
-    if _music_playing():
-        return "Đang nghe nhạc. Mục 19 dừng hết khi cần."
-    if ANTI_AFK.get("enabled"):
-        return "Anti-AFK đang bật, mình sẽ tự gửi thao tác mỗi 10 phút."
-    tips = [
-        "Mẹo: đang Start, gõ 0 để dừng giám sát. Tool sẽ hỏi có tắt tab không.",
-        "Mẹo: dán link YouTube ở mục 18 để nghe nhạc nền.",
-        "Mẹo: mục 17 xem thống kê Anti-AFK và đổi server theo ngày.",
-        "Mẹo: Set up mục 22 để xuất cấu hình trước khi cài lại Termux.",
-        "Mẹo: nhập 'update' ở ô nhập key để cập nhật tool.",
-    ]
-    if random.random() < 0.33:
-        return _time_greeting()
-    return random.choice(tips)
-
-def _wrap_text(text, width):
-    words, lines, cur = text.split(), [], ""
-    for w in words:
-        if len(cur) + len(w) + (1 if cur else 0) <= width:
-            cur = f"{cur} {w}" if cur else w
-        else:
-            lines.append(cur)
-            cur = w
-    if cur:
-        lines.append(cur)
-    return lines or [""]
-
-WING_UP = " /\\  /\\  "
-WING_DOWN = " \\/  \\/  "
-# Cảm xúc nào làm nhân vật có cánh bay lên hay rơi xuống
-_LIFT_FOR_MOOD = {"happy": "up", "excited": "up", "love": "up",
-                  "angry": "down", "sad": "down", "crying": "down", "scared": "down"}
-
-_RAINBOW = ["\033[38;5;196m", "\033[38;5;214m", "\033[38;5;226m", "\033[38;5;46m", "\033[38;5;51m", "\033[38;5;129m"]
-
-def _mascot_sprite():
-    """Trả về (các dòng hình, tên, mã màu) đã áp dụng skin và khuôn mặt theo cảm xúc."""
-    char = MASCOTS.get(MASCOT.get("character"), MASCOTS["meo"])
-    frame = _MASCOT_STATE["frame"]
-    _MASCOT_STATE["frame"] += 1
-    mood = _current_mood()
-    face = MOOD_FACES.get(mood, MOOD_FACES["idle"])
-    if mood in ("idle", "happy", "love") and frame % 4 == 3:
-        face = MOOD_FACES["sleepy"]  # chớp mắt
-    wing = WING_UP if frame % 2 == 0 else WING_DOWN
-    beh = _behavior_tick(mood)
-    if beh and beh.get("face") in MOOD_FACES:
-        face = MOOD_FACES[beh["face"]]
-    rows = [row.replace("{w}", wing).replace("{f}", face) for row in char["tpl"]]
-    season = _season_prop()
-    if season:
-        rows = [season] + rows
-    costume = _current_costume()
-    if costume:
-        rows = [costume] + rows
-    if beh and beh.get("prop_above"):
-        rows = [beh["prop_above"]] + rows
-    if beh and beh.get("prop_below"):
-        rows = rows + [beh["prop_below"]]
-    _MASCOT_STATE["beh_shift"] = beh.get("shift") if beh else None
-    skin = _current_skin()
-    color = C.LPUR
-    if skin == "lapla":
-        rows = ["  ✦   ✧  "] + rows
-    elif skin == "suthi":
-        color = _RAINBOW[frame % 3]
-        rows = ["  ✧ ✦ ✧  "] + [f"✦{r}✦" for r in rows]
-    elif skin == "huyenthoai":
-        color = _RAINBOW[frame % len(_RAINBOW)]
-        halo = ["♛", "♛", "♛"]
-        halo_line = " " + " ".join(halo[i % 3] for i in range(3))
-        rows = [halo_line] + [f"✦{r}✦" for r in rows]
-    return rows, _mascot_display_name(), color
-
-def char_has_wings():
-    return bool(MASCOTS.get(MASCOT.get("character"), MASCOTS["meo"]).get("wings"))
-
-def _mascot_show(tip=None, fall=False):
-    if not MASCOT.get("enabled"):
-        return
-    rows, name, color = _mascot_sprite()
-    text_lines = _wrap_text(tip or _mascot_tip(), 30)
-    width = max(len(l) for l in text_lines)
-    print(f" {C.GRY}┌{'─' * (width + 2)}┐{C.R}")
-    for l in text_lines:
-        print(f" {C.GRY}│{C.R} {C.WHT}{l.ljust(width)}{C.R} {C.GRY}│{C.R}")
-    print(f" {C.GRY}└{'─' * (width + 2)}┘{C.R}")
-    blank = 0
-    if char_has_wings():
-        lift = _MASCOT_STATE.get("lift")
-        if lift and lift[1] > 0:
-            mode = lift[0]
-            _MASCOT_STATE["lift"] = (mode, lift[1] - 1)
-            blank = 0 if mode == "up" else 2
-        else:
-            blank = 1
-    elif _MASCOT_STATE.get("beh_shift") == "up":
-        blank = 0
-    elif _MASCOT_STATE.get("beh_shift") == "down":
-        blank = 2
-    elif fall or _MASCOT_STATE.get("fall"):
-        blank = 1
-    _MASCOT_STATE["fall"] = False
-    for _ in range(blank):
-        print()
-    for row in rows:
-        print(f"   {color}{row}{C.R}")
-    print(f"   {C.GRY}{name}{C.R}")
-
-def _mascot_guess_game():
-    import random
-    secret = random.randint(1, 20)
-    tries = 5
-    tip, mood = "Mình nghĩ một số từ 1 đến 20. Bạn có 5 lượt đoán nhé!", "idle"
-    while True:
-        clear_screen()
-        section_title("ĐOÁN SỐ CÙNG LINH VẬT")
-        _set_mood(mood, 120, tip)
-        _mascot_show(tip)
-        print()
-        raw = ask(f"Lượt còn {tries} · Số của bạn:").strip()
-        if not raw.isdigit() or not 1 <= int(raw) <= 20:
-            tip, mood = "Nhập một số từ 1 đến 20 nhé bạn ơi!", "angry"
-            continue
-        g = int(raw)
-        tries -= 1
-        if g == secret:
-            _mascot_count("guess_win")
-            _set_mood("excited", 120, "Đúng rồi! Bạn giỏi quá!")
-            clear_screen()
-            section_title("ĐOÁN SỐ CÙNG LINH VẬT")
-            _mascot_show("Đúng rồi! Bạn giỏi quá!")
-            wait_enter()
-            return
-        if tries == 0:
-            _set_mood("crying", 120, f"Hết lượt rồi, số là {secret}.")
-            clear_screen()
-            section_title("ĐOÁN SỐ CÙNG LINH VẬT")
-            _mascot_show(f"Hết lượt rồi, số là {secret}. Lần sau nhé!")
-            wait_enter()
-            return
-        hint = "Lớn hơn một chút." if g < secret else "Nhỏ hơn một chút."
-        if tries == 1:
-            tip, mood = f"Sắp hết lượt rồi! {hint}", "scared"
-        else:
-            tip, mood = f"{hint} Còn {tries} lượt nhé.", "sad"
-
-def _mascot_achievements():
-    clear_screen()
-    section_title("THÀNH TÍCH LINH VẬT")
-    points = _mascot_points()
-    max_points = sum(p for _, _, p, _ in _mission_list())
-    if points >= max_points:
-        tip, mood = "Hoàn thành hết nhiệm vụ rồi, giỏi quá!", "excited"
-    elif points > 0:
-        tip, mood = "Làm thêm nhiệm vụ để mở skin đẹp hơn nha!", "happy"
-    else:
-        tip, mood = "Dùng tool và thử các tính năng để nhận điểm nhé!", "happy"
-    _set_mood(mood, 120, tip)
-    _mascot_show(tip)
-    print()
-    print(f" {C.WHT}Điểm nhiệm vụ: {points}/{max_points}{C.R}\n")
-    print(f" {C.WHT}Nhiệm vụ:{C.R}")
-    for _, text, pts, (done, prog) in _mission_list():
-        mark = f"{C.GRN}✓{C.R}" if done else f"{C.GRY}·{C.R}"
-        print(f"   {mark} {text} {C.GRY}({pts} điểm · {prog}){C.R}")
-    top_key, top_count = _habit_top_menu()
-    hour, hcount = _habit_peak_hour()
-    print(f"\n {C.WHT}Thói quen (chỉ lưu trên máy):{C.R}")
-    if top_key:
-        print(f"   Mục hay mở nhất: {top_key} · {MENU_NAMES.get(top_key, '')} ({top_count} lần)")
-    if hour is not None:
-        print(f"   Giờ hay dùng nhất: {hour}h ({hcount} lần)")
-    if not top_key:
-        print(f"   {C.GRY}Chưa có dữ liệu.{C.R}")
-    print(f"\n {C.WHT}Trang phục theo nhân vật:{C.R}")
-    for key, info in MASCOTS.items():
-        uses = int(MASCOT.get("char_uses", {}).get(key, 0))
-        print(f"   {C.WHT}{info['name']}{C.R} {C.GRY}(đã dùng {uses} lần){C.R}")
-        for c in _costumes_for(key):
-            if c["unlocked"]:
-                print(f"     {C.GRN}✓{C.R} {c['name']}")
-            else:
-                print(f"     {C.GRY}✗ {c['name']} — dùng {c['need']} lần ({uses}/{c['need']}){C.R}")
-    print(f"\n {C.WHT}Skin:{C.R}")
-    for key, info in SKINS.items():
-        cur = " ← đang dùng" if _current_skin() == key else ""
-        if _skin_unlocked(key):
-            print(f"   {C.GRN}✓{C.R} {info['name']} — {info['desc']}{C.GRY}{cur}{C.R}")
-        else:
-            print(f"   {C.GRY}✗ {info['name']} — cần {info['points']} điểm{C.R}")
-    wait_enter()
-
-def menu_mascot():
-    while True:
-        clear_screen()
-        section_title("LINH VẬT (MASCOT)")
-        char = MASCOTS.get(MASCOT.get("character"), MASCOTS["meo"])
-        print(f" Trạng thái: {C.GRN + 'BẬT' if MASCOT.get('enabled') else C.RED + 'TẮT'}{C.R}")
-        print(f" Tên: {C.WHT}{_mascot_display_name()}{C.R} · Nhân vật: {C.WHT}{char['name']}{C.R} · Skin: {C.WHT}{SKINS[_current_skin()]['name']}{C.R}\n")
-        print(f"{C.LPUR}[1]{C.R} {C.WHT}Bật / tắt linh vật{C.R}")
-        print(f"{C.LPUR}[2]{C.R} {C.WHT}Đổi nhân vật và skin{C.R}")
-        print(f"{C.LPUR}[3]{C.R} {C.WHT}Xem thử{C.R}")
-        print(f"{C.LPUR}[4]{C.R} {C.WHT}Đoán số (mini-game){C.R}")
-        print(f"{C.LPUR}[5]{C.R} {C.WHT}Thành tích và nhiệm vụ{C.R}")
-        print(f"{C.LPUR}[6]{C.R} {C.WHT}Đổi tên linh vật{C.R}")
-        print(f"{C.LPUR}[7]{C.R} {C.WHT}Âm thanh linh vật [{'Bật' if MASCOT.get('sound') else 'Tắt'}]{C.R}")
-        print(f"{C.RED}[0] Quay lại{C.R}\n")
-        sub = ask("Chọn:").strip()
-        if sub == "0":
-            return
-        elif sub == "1":
-            MASCOT["enabled"] = not MASCOT.get("enabled", True)
-            save_config_file()
-            msg_done(f"Linh vật đã {'BẬT' if MASCOT['enabled'] else 'TẮT'}.")
-            time.sleep(1)
-        elif sub == "2":
-            keys = list(MASCOTS.keys())
-            print(f" {C.GRY}Nhân vật:{C.R}")
-            for i, k in enumerate(keys, 1):
-                print(f"  {C.LPUR}[{i}]{C.R} {C.WHT}{MASCOTS[k]['name']}{C.R}")
-            pick = ask("Chọn nhân vật:").strip()
-            if pick.isdigit() and 1 <= int(pick) <= len(keys):
-                MASCOT["character"] = keys[int(pick) - 1]
-            else:
-                invalid_choice(pick)
-                time.sleep(1)
-                continue
-            skeys = list(SKINS.keys())
-            print(f"\n {C.GRY}Skin:{C.R}")
-            for i, k in enumerate(skeys, 1):
-                if _skin_unlocked(k):
-                    print(f"  {C.LPUR}[{i}]{C.R} {C.WHT}{SKINS[k]['name']}{C.R} {C.GRY}— {SKINS[k]['desc']}{C.R}")
-                else:
-                    print(f"  {C.GRY}[{i}] {SKINS[k]['name']} (cần {SKINS[k]['points']} điểm){C.R}")
-            spick = ask("Chọn skin (Enter giữ skin cũ):").strip()
-            if spick.isdigit() and 1 <= int(spick) <= len(skeys) and _skin_unlocked(skeys[int(spick) - 1]):
-                MASCOT["skin"] = skeys[int(spick) - 1]
-            elif spick:
-                msg_err("Skin này chưa mở hoặc số không đúng, giữ skin cũ.")
-            cos = _costumes_for(MASCOT["character"])
-            print(f"\n {C.GRY}Trang phục của {MASCOTS[MASCOT['character']]['name']}:{C.R}")
-            print(f"  {C.LPUR}[0]{C.R} {C.WHT}Không trang phục{C.R}")
-            for i, c in enumerate(cos, 1):
-                if c["unlocked"]:
-                    print(f"  {C.LPUR}[{i}]{C.R} {C.WHT}{c['name']}{C.R}")
-                else:
-                    print(f"  {C.GRY}[{i}] {c['name']} (dùng {MASCOTS[MASCOT['character']]['name']} {c['need']} lần, hiện {c['uses']}){C.R}")
-            cpick = ask("Chọn trang phục (Enter giữ cũ):").strip()
-            costumes = MASCOT.setdefault("costume", {})
-            if cpick == "0":
-                costumes[MASCOT["character"]] = ""
-            elif cpick.isdigit() and 1 <= int(cpick) <= len(cos) and cos[int(cpick) - 1]["unlocked"]:
-                costumes[MASCOT["character"]] = cos[int(cpick) - 1]["key"]
-            elif cpick:
-                msg_err("Trang phục này chưa mở hoặc số không đúng.")
-            save_config_file()
-            msg_done(f"Đã đổi: {MASCOTS[MASCOT['character']]['name']} · {SKINS[_current_skin()]['name']}.")
-            time.sleep(1)
-        elif sub == "3":
-            print()
-            _mascot_show("Xin chào! Mình là linh vật của tool.")
-            wait_enter()
-        elif sub == "4":
-            _mascot_guess_game()
-        elif sub == "5":
-            _mascot_achievements()
-        elif sub == "7":
-            MASCOT["sound"] = not MASCOT.get("sound", False)
-            save_config_file()
-            if MASCOT["sound"]:
-                ok = _mascot_play_mood("happy", force=True)
-                msg_done("Đã bật âm thanh linh vật." + ("" if ok else " (Chưa có trình phát: cài mpv hoặc Termux:API)"))
-            else:
-                msg_done("Đã tắt âm thanh linh vật.")
-            time.sleep(1.5)
-        elif sub == "6":
-            new = ask(f"Tên mới (1-16 ký tự, Enter để về tên mặc định):").strip()
-            if not new:
-                MASCOT["name"] = ""
-                save_config_file()
-                msg_done(f"Đã về tên mặc định: {_mascot_display_name()}.")
-            elif len(new) > 16 or "\n" in new:
-                msg_err("Tên phải từ 1 đến 16 ký tự.")
-            else:
-                MASCOT["name"] = new
-                save_config_file()
-                msg_done(f"Đã đặt tên: {new}.")
-            time.sleep(1)
-        else:
-            invalid_choice(sub)
-
 def show_banner():
     clear_screen()
     print_ascii_banner()
@@ -5620,17 +4499,6 @@ def show_banner():
     inner = w - 4
     lw = 12
     vw = inner - lw - 1
-    if not _MASCOT_STATE.get("counted"):
-        _MASCOT_STATE["counted"] = True
-        MASCOT["sessions"] = int(MASCOT.get("sessions", 0)) + 1
-        uses = MASCOT.setdefault("char_uses", {})
-        cur_char = MASCOT.get("character", "meo")
-        uses[cur_char] = int(uses.get(cur_char, 0)) + 1
-        MASCOT["last_seen"] = datetime.now().strftime("%Y-%m-%d")
-        try:
-            save_config_file()
-        except Exception:
-            pass
     info = _ttl("sysinfo", 30, get_system_info)
     n_tabs = len(_ttl("pkgs", 20, list_installed_packages))
     rooted = bool(root_mode())
@@ -5734,10 +4602,6 @@ def show_banner():
         right = cell(entries[i + half], inner - colw) if i + half < len(entries) else ""
         print(box_row(pad(cell(entries[i], colw), colw) + right, w))
     print(box_bot(w))
-    try:
-        _mascot_show()
-    except Exception:
-        pass
 
 # ==================== MENU SET UP / BACKUP ====================
 def setup_auto_rejoin():
@@ -6539,7 +5403,6 @@ def menu_anti_afk():
         if sub == "0":
             return
         elif sub == "1":
-            MASCOT["used_afk"] = True
             ANTI_AFK["enabled"] = True
             _ANTI_AFK_STATE["last"] = time.time()
             save_config_file()
@@ -6587,6 +5450,25 @@ def _music_wake(on):
         except Exception:
             pass
 
+def _ytdlp_cmd():
+    """Trả về lệnh chạy yt-dlp (list) hoặc None. Tìm cả trong ~/.local/bin và bản cài dạng module."""
+    p = shutil.which("yt-dlp")
+    if not p:
+        for d in (os.path.expanduser("~/.local/bin"), "/data/data/com.termux/files/usr/bin"):
+            c = os.path.join(d, "yt-dlp")
+            if os.path.isfile(c) and os.access(c, os.X_OK):
+                p = c
+                break
+    if p:
+        return [p]
+    try:
+        import importlib.util
+        if importlib.util.find_spec("yt_dlp"):
+            return [sys.executable, "-m", "yt_dlp"]
+    except Exception:
+        pass
+    return None
+
 def music_stop():
     p = MUSIC.get("proc")
     if p is not None and p.poll() is None:
@@ -6612,27 +5494,53 @@ def music_play(url):
     if not _is_youtube_url(url):
         return False, "link không phải YouTube (cần youtube.com hoặc youtu.be)"
     music_stop()
+    ytdlp = _ytdlp_cmd()
+    err_path = os.path.join(os.path.expanduser("~"), ".pain_music_err.txt")
     if shutil.which("mpv"):
-        # mpv tự gọi yt-dlp nếu có; chỉ phát video đầu tiên, bỏ qua playlist
-        cmd = ["mpv", "--no-video", "--really-quiet", "--ytdl-raw-options=no-playlist=", url]
-    elif shutil.which("yt-dlp") and shutil.which("termux-media-player"):
-        lines = (run_cmd(["yt-dlp", "-g", "-f", "bestaudio", "--no-playlist", url], timeout=60) or "").strip().splitlines()
+        # mpv gọi yt-dlp để lấy luồng âm thanh; chỉ phát video đầu tiên, bỏ qua playlist
+        cmd = ["mpv", "--no-video", "--msg-level=all=error", "--ytdl-raw-options=no-playlist="]
+        if ytdlp and len(ytdlp) == 1:
+            cmd.append("--script-opts=ytdl_hook-ytdl_path=" + ytdlp[0])
+        cmd.append(url)
+        managed = True
+    elif ytdlp and shutil.which("termux-media-player"):
+        lines = (run_cmd(ytdlp + ["-g", "-f", "bestaudio", "--no-playlist", url], timeout=60) or "").strip().splitlines()
         if not lines:
             return False, "yt-dlp không lấy được luồng âm thanh (link lỗi hoặc video bị chặn)"
-        cmd = ["termux-media-player", "play", lines[0]]
+        # termux-media-player chỉ gửi lệnh cho dịch vụ rồi thoát, nên kiểm tra mã thoát thay vì tiến trình
+        res = subprocess.run(["termux-media-player", "play", lines[0]], stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20)
+        if res.returncode != 0:
+            return False, "termux-media-player báo lỗi (cài Termux:API app và chạy lại)"
+        MUSIC["proc"] = None
+        MUSIC["url"] = url
+        try:
+            _music_history_add(url)
+        except Exception:
+            pass
+        _music_wake(True)
+        return True, "đang phát ở nền"
     else:
-        return False, "chưa có trình phát: chạy  pkg install mpv  và  pip install yt-dlp"
+        return False, "chưa có trình phát: chạy  pkg install mpv  và  pip install -U yt-dlp"
     try:
+        errf = open(err_path, "w", encoding="utf-8")
         proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL, start_new_session=True)
+                                stderr=errf, start_new_session=True)
     except Exception as e:
         return False, f"không mở được trình phát: {e}"
-    time.sleep(2)
+    time.sleep(3)
     if proc.poll() is not None:
-        return False, "trình phát thoát ngay (link lỗi hoặc yt-dlp cũ, thử cập nhật: pip install -U yt-dlp)"
+        reason = ""
+        try:
+            with open(err_path, "r", encoding="utf-8", errors="replace") as f:
+                lines = [x.strip() for x in f if x.strip()]
+            reason = lines[-1] if lines else ""
+        except Exception:
+            pass
+        hint = "thử cập nhật: pip install -U yt-dlp"
+        return False, f"trình phát thoát ngay ({reason[:160]}) — {hint}" if reason else f"trình phát thoát ngay — {hint}"
     MUSIC["proc"] = proc
     MUSIC["url"] = url
-    MASCOT["used_music"] = True
     try:
         _music_history_add(url)
     except Exception:
@@ -6683,9 +5591,10 @@ _atexit.register(_music_cleanup_at_exit)
 
 # ==================== KIỂM TRA / CẬP NHẬT YT-DLP ====================
 def _ytdlp_version_local():
-    if not shutil.which("yt-dlp"):
+    cmd = _ytdlp_cmd()
+    if not cmd:
         return None
-    out = run_cmd(["yt-dlp", "--version"], timeout=15)
+    out = run_cmd(cmd + ["--version"], timeout=15)
     return out.strip().splitlines()[0] if out and out.strip() else None
 
 def _ytdlp_version_latest():
@@ -6725,7 +5634,7 @@ def ytdlp_update():
 def menu_ytdlp_check():
     clear_screen()
     section_title("KIỂM TRA / CẬP NHẬT YT-DLP")
-    if not shutil.which("yt-dlp"):
+    if not _ytdlp_cmd():
         msg_warn("Chưa cài yt-dlp. Chạy: pip install -U yt-dlp")
         wait_enter()
         return
@@ -6847,7 +5756,7 @@ def menu_music():
         else:
             print(f" Trạng thái: {C.GRY}đang dừng{C.R}")
         mpv_ok = "✓" if shutil.which("mpv") else "✗"
-        ytdlp_ok = "✓" if shutil.which("yt-dlp") else "✗"
+        ytdlp_ok = "✓" if _ytdlp_cmd() else "✗"
         print(f" {C.GRY}Trình phát mpv {mpv_ok} · yt-dlp {ytdlp_ok}{C.R}\n")
         print(f"{C.LPUR}[1]{C.R} {C.WHT}Phát link YouTube{C.R}")
         print(f"{C.LPUR}[2]{C.R} {C.WHT}Dừng nhạc{C.R}")
@@ -6879,7 +5788,7 @@ def menu_music():
             msg_info("Đang mở nhạc...")
             ok, info = music_play(url)
             (msg_done if ok else msg_err)(info[0].upper() + info[1:] if ok else f"Không phát được: {info}")
-            if not ok and shutil.which("yt-dlp"):
+            if not ok and _ytdlp_cmd():
                 cur, latest, outdated = ytdlp_status()
                 if outdated:
                     print(f" {C.YEL}yt-dlp đang là {cur}, bản mới là {latest}. Lỗi thường do bản cũ.{C.R}")
@@ -8913,7 +7822,7 @@ def menu_executor_binding():
 
 MENU_NAMES = {
     "1": "Bắt đầu", 
-    "2": "Model Rejoin", 
+    "2": "Thiết lập cơ bản", 
     "3": "Thiết lập prefix package", 
     "4": "Thay đổi ID", 
     "5": "Thiết lập Webhook URL",
@@ -9192,18 +8101,51 @@ def search_packages_by_keyword():
         termios.tcsetattr(fd, termios.TCSADRAIN, old_attr)
     print()
 
+_FETCH_SCRIPT = r"""
+import sys, json, urllib.request, urllib.error
+url = sys.argv[1]
+limit = int(sys.argv[2])
+try:
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Linux; Android 13)"})
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        body = resp.read(limit).decode("utf-8", "replace")
+        print(json.dumps({"ok": True, "status": resp.status, "body": body}))
+except urllib.error.HTTPError as e:
+    print(json.dumps({"ok": False, "status": e.code, "error": "HTTP " + str(e.code)}))
+except Exception as e:
+    print(json.dumps({"ok": False, "status": None, "error": str(e)}))
+"""
+
+def _fetch_isolated(url, max_bytes=300000, timeout=10):
+    """Tải URL trong tiến trình con để lỗi ở tầng mạng/SSL không làm sập cả tool.
+    Trả về dict: ok, status, body hoặc error."""
+    try:
+        res = subprocess.run([sys.executable, "-c", _FETCH_SCRIPT, url, str(max_bytes)],
+                             capture_output=True, text=True, encoding="utf-8", errors="replace",
+                             timeout=timeout + 10, stdin=subprocess.DEVNULL)
+    except Exception as e:
+        return {"ok": False, "status": None, "error": f"không chạy được kiểm tra: {e}", "crashed": True}
+    if res.returncode != 0:
+        return {"ok": False, "status": None, "error": f"tiến trình kiểm tra lỗi (mã {res.returncode})", "crashed": True}
+    try:
+        return json.loads(res.stdout.strip().splitlines()[-1])
+    except Exception:
+        return {"ok": False, "status": None, "error": "phản hồi không đọc được", "crashed": True}
+
 def check_game_target(value):
-    """Kiểm tra ID game hoặc link server VIP. Trả về (ok, thông báo, tên game hoặc None)."""
+    """Kiểm tra ID game hoặc link server VIP. Trả về (ok, thông báo, tên game hoặc None).
+    ok = None nghĩa là không kiểm tra được (mạng/lỗi nội bộ) nhưng vẫn cho phép dùng."""
     global VIP_EXPIRED_PHRASES
     value = value.strip()
     if value.isdigit():
         url = "https://games.roblox.com/v1/games/multiget-place-details?placeIds=" + value
+        r = _fetch_isolated(url)
+        if not r.get("ok"):
+            return None, f"Không kiểm tra được Game ID ({r.get('error', 'lỗi mạng')}). Vẫn có thể dùng ID này.", None
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Linux; Android 13)"})
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                data = json.loads(resp.read().decode("utf-8", "replace"))
-        except Exception as e:
-            return None, f"Không kiểm tra được Game ID (mạng lỗi: {e})", None
+            data = json.loads(r.get("body", ""))
+        except Exception:
+            return None, "Không kiểm tra được Game ID (phản hồi lạ từ Roblox).", None
         if isinstance(data, list):
             if not data:
                 return False, f"Game ID {value} không tồn tại hoặc đã bị gỡ.", None
@@ -9212,21 +8154,16 @@ def check_game_target(value):
         return None, "Không kiểm tra được Game ID (phản hồi lạ từ Roblox).", None
 
     if value.lower().startswith(("https://", "http://")) and "roblox" in value.lower():
-        try:
-            req = urllib.request.Request(value, headers={"User-Agent": "Mozilla/5.0 (Linux; Android 13)"})
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                code = resp.status
-                body = resp.read(300000).decode("utf-8", "replace").lower()
-        except urllib.error.HTTPError as e:
-            if e.code == 404:
+        r = _fetch_isolated(value, 300000)
+        if not r.get("ok"):
+            if r.get("status") == 404:
                 return False, "Link server VIP không tồn tại.", None
-            return None, f"Không kiểm tra được link VIP (HTTP {e.code}).", None
-        except Exception as e:
-            return None, f"Không kiểm tra được link VIP (mạng lỗi: {e}).", None
+            if r.get("status"):
+                return None, f"Không kiểm tra được link VIP (HTTP {r['status']}).", None
+            return None, f"Không kiểm tra được link VIP ({r.get('error', 'mạng lỗi')}). Vẫn có thể dùng link này.", None
+        body = r.get("body", "").lower()
         if any(p in body for p in VIP_EXPIRED_PHRASES):
             return False, "Link server VIP đã hết hạn hoặc không còn dùng được.", None
-        if code == 404:
-            return False, "Link server VIP không tồn tại.", None
         return True, "Link VIP hợp lệ (chưa xác nhận được server còn mở).", "Server VIP Custom"
 
     return False, "Định dạng không hợp lệ. Nhập ID game (chỉ số) hoặc link server VIP Roblox.", None
@@ -9541,11 +8478,12 @@ UPDATE_DOWNLOAD_URL = "https://paintool-bot.onrender.com/api/download/latest"
 def _download_and_verify_update(latest):
     """Tải bản mới vào file tạm và kiểm tra trước khi dùng.
     Trả về (ok, lỗi_hoặc_đường_dẫn_tạm). Không đụng tới file đang chạy."""
-    import urllib.request
     tmp_path = os.path.abspath(__file__) + ".new"
     try:
-        with urllib.request.urlopen(UPDATE_DOWNLOAD_URL, timeout=30) as response:
-            raw = response.read()
+        r = _fetch_isolated(UPDATE_DOWNLOAD_URL, 5000000, timeout=30)
+        if not r.get("ok"):
+            return False, f"không tải được bản cập nhật ({r.get('error', 'mạng lỗi')})"
+        raw = r.get("body", "").encode("utf-8")
         if len(raw) < 5000:
             return False, "file tải về quá nhỏ, có thể server đang lỗi"
         text = raw.decode("utf-8")
@@ -9846,170 +8784,6 @@ def menu_config_io():
         else:
             invalid_choice(sub)
 
-
-def menu_rejoin_models():
-    """Menu Model Rejoin - chọn mode và cấu hình"""
-    global AUTO_REJOIN_MODE, SMART_REJOIN_ENABLED, SMART_REJOIN_BASE_DELAY
-    global RANDOMIZE_ENABLED, RANDOMIZE_LEVEL
-
-    while True:
-        clear_screen()
-        section_title("MODEL REJOIN")
-
-        print(f" Rejoin Mode: {C.GRN + 'Mode 1 (Reactive)' if AUTO_REJOIN_MODE == 1 else C.GRN + 'Mode 2 (Periodic)' if AUTO_REJOIN_MODE == 2 else C.GRN + 'Mode 3 (Smart)'}{C.R}")
-        print(f" Smart Rejoin: {C.GRN + 'BẬT' if SMART_REJOIN_ENABLED else C.RED + 'TẮT'}{C.R}")
-        print(f" Randomize: {C.GRN + 'BẬT (Level ' + str(RANDOMIZE_LEVEL) + ')' if RANDOMIZE_ENABLED else C.RED + 'TẮT'}{C.R}\n")
-
-        print(f"{C.GRY}Mode 1 (Reactive):{C.R} Khi phát hiện lỗi → rejoin ngay")
-        print(f"{C.GRY}Mode 2 (Periodic):{C.R} Mỗi N phút rejoin 1 lần (định kỳ)")
-        print(f"{C.GRY}Mode 3 (Smart):{C.R} Tự học & điều chỉnh delay dựa trên lỗi\n")
-
-        print(f"{C.LPUR}[1]{C.R} Mode 1 - Reactive (Phát hiện lỗi mới rejoin)")
-        print(f"{C.LPUR}[2]{C.R} Mode 2 - Periodic (Rejoin định kỳ)")
-        print(f"{C.LPUR}[3]{C.R} Mode 3 - Smart (Tự điều chỉnh)")
-        print(f"{C.LPUR}[4]{C.R} Randomize Behavior (Tránh bot detection)")
-        print(f"{C.LPUR}[5]{C.R} Cấu hình nâng cao")
-        print(f"{C.RED}[0] Quay lại{C.R}\n")
-
-        sub = ask("Chọn:").strip()
-
-        if sub == "0":
-            return
-        elif sub == "1":
-            AUTO_REJOIN_MODE = 1
-            SMART_REJOIN_ENABLED = False
-            save_config_file()
-            msg_done("Đã chuyển sang Mode 1 (Reactive - khi phát hiện lỗi mới rejoin).")
-            time.sleep(1)
-        elif sub == "2":
-            AUTO_REJOIN_MODE = 2
-            SMART_REJOIN_ENABLED = False
-            save_config_file()
-            msg_done("Đã chuyển sang Mode 2 (Periodic - rejoin mỗi N phút).")
-            time.sleep(1)
-        elif sub == "3":
-            AUTO_REJOIN_MODE = 1
-            SMART_REJOIN_ENABLED = True
-            save_config_file()
-            msg_done(f"Đã bật Mode 3 (Smart Rejoin - tự điều chỉnh delay, base: {SMART_REJOIN_BASE_DELAY}p).")
-            time.sleep(1)
-        elif sub == "4":
-            menu_randomize_behavior()
-        elif sub == "5":
-            menu_rejoin_advanced()
-        else:
-            invalid_choice(sub)
-
-def menu_randomize_behavior():
-    """Menu cấu hình Randomize Behavior"""
-    global RANDOMIZE_ENABLED, RANDOMIZE_LEVEL
-
-    while True:
-        clear_screen()
-        section_title("RANDOMIZE BEHAVIOR")
-
-        print(f" Trạng thái: {C.GRN + 'BẬT' if RANDOMIZE_ENABLED else C.RED + 'TẮT'}{C.R}")
-        print(f" Level: {RANDOMIZE_LEVEL}/5\n")
-
-        print(f"{C.GRY}Tác dụng: Tránh Roblox anti-cheat phát hiện bot{C.R}")
-        print(f"  • Click delay: thay đổi ngẫu nhiên")
-        print(f"  • Swipe speed: không bao giờ giống nhau")
-        print(f"  • Pause time: biến động để tạo pattern tự nhiên\n")
-
-        levels = {
-            "1": "Off - Không randomize",
-            "2": "Low - 10% thay đổi (nhẹ nhàng)",
-            "3": "Medium - 30% thay đổi (cân bằng)",
-            "4": "High - 50% thay đổi (mạnh)",
-            "5": "Max - 70% thay đổi (cực đại)",
-        }
-
-        for k, v in levels.items():
-            mark = f"{C.GRN}✓{C.R}" if int(k) == RANDOMIZE_LEVEL and RANDOMIZE_ENABLED else " "
-            print(f" {mark} {C.LPUR}[{k}]{C.R} {v}")
-
-        print(f"\n{C.LPUR}[0]{C.R} Tắt Randomize")
-        print(f"{C.RED}[q] Quay lại{C.R}\n")
-
-        sub = ask("Chọn:").strip()
-
-        if sub == "q":
-            return
-        elif sub == "0":
-            RANDOMIZE_ENABLED = False
-            save_config_file()
-            msg_done("Đã tắt Randomize Behavior.")
-            time.sleep(1)
-        elif sub in ("1", "2", "3", "4", "5"):
-            RANDOMIZE_LEVEL = int(sub)
-            RANDOMIZE_ENABLED = True
-            save_config_file()
-            msg_done(f"Randomize Level {sub}: {levels[sub]}")
-            time.sleep(1)
-        else:
-            invalid_choice(sub)
-
-def menu_rejoin_advanced():
-    """Menu cấu hình nâng cao Smart Rejoin"""
-    global SMART_REJOIN_BASE_DELAY, SMART_REJOIN_MIN_DELAY, SMART_REJOIN_MAX_DELAY
-
-    while True:
-        clear_screen()
-        section_title("CẤU HÌNH NÂNG CAO - SMART REJOIN")
-
-        print(f" Base Delay: {SMART_REJOIN_BASE_DELAY} phút")
-        print(f" Min Delay: {SMART_REJOIN_MIN_DELAY} phút")
-        print(f" Max Delay: {SMART_REJOIN_MAX_DELAY} phút\n")
-
-        print(f"{C.LPUR}[1]{C.R} Thay đổi base delay ({SMART_REJOIN_BASE_DELAY}p)")
-        print(f"{C.LPUR}[2]{C.R} Thay đổi min delay ({SMART_REJOIN_MIN_DELAY}p)")
-        print(f"{C.LPUR}[3]{C.R} Thay đổi max delay ({SMART_REJOIN_MAX_DELAY}p)")
-        print(f"{C.RED}[0] Quay lại{C.R}\n")
-
-        sub = ask("Chọn:").strip()
-
-        if sub == "0":
-            return
-        elif sub == "1":
-            try:
-                val = int(ask(f"Nhập base delay (phút, hiện: {SMART_REJOIN_BASE_DELAY}):").strip() or SMART_REJOIN_BASE_DELAY)
-                if 1 <= val <= 60:
-                    SMART_REJOIN_BASE_DELAY = val
-                    save_config_file()
-                    msg_done(f"Base delay đã đặt thành {val} phút.")
-                else:
-                    msg_err("Giá trị phải từ 1 đến 60 phút.")
-            except ValueError:
-                msg_err("Nhập sai định dạng.")
-            time.sleep(1)
-        elif sub == "2":
-            try:
-                val = int(ask(f"Nhập min delay (phút, hiện: {SMART_REJOIN_MIN_DELAY}):").strip() or SMART_REJOIN_MIN_DELAY)
-                if 1 <= val <= 30:
-                    SMART_REJOIN_MIN_DELAY = val
-                    save_config_file()
-                    msg_done(f"Min delay đã đặt thành {val} phút.")
-                else:
-                    msg_err("Giá trị phải từ 1 đến 30 phút.")
-            except ValueError:
-                msg_err("Nhập sai định dạng.")
-            time.sleep(1)
-        elif sub == "3":
-            try:
-                val = int(ask(f"Nhập max delay (phút, hiện: {SMART_REJOIN_MAX_DELAY}):").strip() or SMART_REJOIN_MAX_DELAY)
-                if 5 <= val <= 120:
-                    SMART_REJOIN_MAX_DELAY = val
-                    save_config_file()
-                    msg_done(f"Max delay đã đặt thành {val} phút.")
-                else:
-                    msg_err("Giá trị phải từ 5 đến 120 phút.")
-            except ValueError:
-                msg_err("Nhập sai định dạng.")
-            time.sleep(1)
-        else:
-            invalid_choice(sub)
-
-
 def menu_setup():
     while True:
         clear_screen()
@@ -10022,21 +8796,20 @@ def menu_setup():
         print(f"{C.LPUR}[6]{C.R} {C.WHT}Profile cấu hình [{len(PROFILES)} profile]{C.R}")
         print(f"{C.LPUR}[7]{C.R} {C.WHT}Danh sách package trên máy (chọn để copy){C.R}")
         print(f"{C.LPUR}[8]{C.R} {C.WHT}Hẹn giờ tự chạy / tự dừng [{'Bật' if (SCHEDULE.get('start') or SCHEDULE.get('stop')) else 'Tắt'}]{C.R}")
-        print(f"{C.LPUR}[9]{C.R} {C.WHT}Linh vật (Mascot) [{'Bật' if MASCOT.get('enabled') else 'Tắt'}]{C.R}")
-        print(f"{C.LPUR}[10]{C.R} {C.WHT}Graphics Optimizer (đồ họa thấp + giới hạn FPS) [{gfx_settings_label()}]{C.R}")
-        print(f"{C.LPUR}[11]{C.R} {C.WHT}Biệt danh tab (Alias) [{len(ALIASES)} tab]{C.R}")
-        print(f"{C.LPUR}[12]{C.R} {C.WHT}Kiểm tra mạng trước khi rejoin [{'Bật' if NET_CHECK else 'Tắt'}]{C.R}")
-        print(f"{C.LPUR}[13]{C.R} {C.WHT}Lịch tự động restart [{auto_restart_label()}]{C.R}")
-        print(f"{C.LPUR}[14]{C.R} {C.WHT}Client Key Injector [{key_label()}]{C.R}")
-        print(f"{C.LPUR}[15]{C.R} {C.WHT}Phát hiện màn hình trắng/đen & GUI đứng [{screen_guard_label()}]{C.R}")
-        print(f"{C.LPUR}[16]{C.R} {C.WHT}Auto Server Hop (đổi server khi lag) [{hop_label()}]{C.R}")
-        print(f"{C.LPUR}[17]{C.R} {C.WHT}Pain AI{C.R}")
-        print(f"{C.LPUR}[18]{C.R} {C.WHT}Update Tool{C.R}")
-        print(f"{C.LPUR}[19]{C.R} {C.WHT}Giờ im lặng cảnh báo [{'Bật' if QUIET_HOURS.get('enabled') else 'Tắt'}]{C.R}")
-        print(f"{C.LPUR}[20]{C.R} {C.WHT}Giới hạn thời gian chạy [{'Bật' if STOP_TIMER.get('enabled') else 'Tắt'}]{C.R}")
-        print(f"{C.LPUR}[21]{C.R} {C.WHT}Chế độ chỉ theo dõi [{'Bật' if MONITOR_ONLY else 'Tắt'}]{C.R}")
-        print(f"{C.LPUR}[22]{C.R} {C.WHT}Lưu ảnh khi có lỗi nghiêm trọng [{'Bật' if SCREEN_ARCHIVE.get('enabled') else 'Tắt'}]{C.R}")
-        print(f"{C.LPUR}[23]{C.R} {C.WHT}Xuất / Nhập cấu hình{C.R}")
+        print(f"{C.LPUR}[9]{C.R} {C.WHT}Graphics Optimizer (đồ họa thấp + giới hạn FPS) [{gfx_settings_label()}]{C.R}")
+        print(f"{C.LPUR}[10]{C.R} {C.WHT}Biệt danh tab (Alias) [{len(ALIASES)} tab]{C.R}")
+        print(f"{C.LPUR}[11]{C.R} {C.WHT}Kiểm tra mạng trước khi rejoin [{'Bật' if NET_CHECK else 'Tắt'}]{C.R}")
+        print(f"{C.LPUR}[12]{C.R} {C.WHT}Lịch tự động restart [{auto_restart_label()}]{C.R}")
+        print(f"{C.LPUR}[13]{C.R} {C.WHT}Client Key Injector [{key_label()}]{C.R}")
+        print(f"{C.LPUR}[14]{C.R} {C.WHT}Phát hiện màn hình trắng/đen & GUI đứng [{screen_guard_label()}]{C.R}")
+        print(f"{C.LPUR}[15]{C.R} {C.WHT}Auto Server Hop (đổi server khi lag) [{hop_label()}]{C.R}")
+        print(f"{C.LPUR}[16]{C.R} {C.WHT}Pain AI{C.R}")
+        print(f"{C.LPUR}[17]{C.R} {C.WHT}Update Tool{C.R}")
+        print(f"{C.LPUR}[18]{C.R} {C.WHT}Giờ im lặng cảnh báo [{'Bật' if QUIET_HOURS.get('enabled') else 'Tắt'}]{C.R}")
+        print(f"{C.LPUR}[19]{C.R} {C.WHT}Giới hạn thời gian chạy [{'Bật' if STOP_TIMER.get('enabled') else 'Tắt'}]{C.R}")
+        print(f"{C.LPUR}[20]{C.R} {C.WHT}Chế độ chỉ theo dõi [{'Bật' if MONITOR_ONLY else 'Tắt'}]{C.R}")
+        print(f"{C.LPUR}[21]{C.R} {C.WHT}Lưu ảnh khi có lỗi nghiêm trọng [{'Bật' if SCREEN_ARCHIVE.get('enabled') else 'Tắt'}]{C.R}")
+        print(f"{C.LPUR}[22]{C.R} {C.WHT}Xuất / Nhập cấu hình{C.R}")
         print(f"{C.RED}[0] Quay lại menu chính{C.R}")
         sub = input("Chọn: ").strip()
         if sub == "1":
@@ -10064,49 +8837,46 @@ def menu_setup():
             announce_choice("8", "Hẹn giờ tự chạy / tự dừng")
             menu_schedule()
         elif sub == "9":
-            announce_choice("9", "Linh vật")
-            menu_mascot()
-        elif sub == "10":
-            announce_choice("10", "Graphics Optimizer")
+            announce_choice("9", "Graphics Optimizer")
             menu_low_graphics()
-        elif sub == "11":
-            announce_choice("11", "Biệt danh tab")
+        elif sub == "10":
+            announce_choice("10", "Biệt danh tab")
             menu_alias()
-        elif sub == "12":
-            announce_choice("12", "Kiểm tra mạng trước khi rejoin")
+        elif sub == "11":
+            announce_choice("11", "Kiểm tra mạng trước khi rejoin")
             setup_net_check()
-        elif sub == "13":
-            announce_choice("13", "Lịch tự động restart")
+        elif sub == "12":
+            announce_choice("12", "Lịch tự động restart")
             menu_auto_restart()
-        elif sub == "14":
-            announce_choice("14", "Client Key Injector")
+        elif sub == "13":
+            announce_choice("13", "Client Key Injector")
             menu_key_injector()
-        elif sub == "15":
-            announce_choice("15", "Phát hiện màn hình trắng/đen & GUI đứng")
+        elif sub == "14":
+            announce_choice("14", "Phát hiện màn hình trắng/đen & GUI đứng")
             menu_screen_guard()
-        elif sub == "16":
-            announce_choice("16", "Auto Server Hop")
+        elif sub == "15":
+            announce_choice("15", "Auto Server Hop")
             menu_server_hop()
-        elif sub == "17":
-            announce_choice("17", "Pain AI")
+        elif sub == "16":
+            announce_choice("16", "Pain AI")
             menu_ai_setup()
-        elif sub == "18":
-            announce_choice("18", "Update Tool")
+        elif sub == "17":
+            announce_choice("17", "Update Tool")
             menu_update_tool()
-        elif sub == "19":
-            announce_choice("19", "Giờ im lặng cảnh báo")
+        elif sub == "18":
+            announce_choice("18", "Giờ im lặng cảnh báo")
             menu_quiet_hours()
-        elif sub == "20":
-            announce_choice("20", "Giới hạn thời gian chạy")
+        elif sub == "19":
+            announce_choice("19", "Giới hạn thời gian chạy")
             menu_stop_timer()
-        elif sub == "21":
-            announce_choice("21", "Chế độ chỉ theo dõi")
+        elif sub == "20":
+            announce_choice("20", "Chế độ chỉ theo dõi")
             toggle_monitor_only()
-        elif sub == "22":
-            announce_choice("22", "Lưu ảnh khi có lỗi nghiêm trọng")
+        elif sub == "21":
+            announce_choice("21", "Lưu ảnh khi có lỗi nghiêm trọng")
             toggle_screen_archive()
-        elif sub == "23":
-            announce_choice("23", "Xuất / Nhập cấu hình")
+        elif sub == "22":
+            announce_choice("22", "Xuất / Nhập cấu hình")
             menu_config_io()
         elif sub == "0":
             msg_info("Quay lại menu chính...")
@@ -10309,152 +9079,6 @@ def menu_open_clones():
         msg_warn(f"{stats['fail']} tab không mở được (xem thông báo phía trên).")
     wait_enter()
 
-def _ai_ping_all():
-    """Kiểm tra từng khóa đã đặt. Trả về danh sách (nhãn, ok, thông_báo)."""
-    out = []
-    if not _HAS_AI_SDK:
-        return [("Module AI", False, "chưa cài module AI (xem hướng dẫn cài đặt)")]
-    for idx, key in enumerate(AI_KEYS_INLINE):
-        label = _ai_key_labels()[idx]
-        if not _ai_key_is_set(key):
-            out.append((label, False, "chưa đặt"))
-            continue
-        client = _ai_client(idx)
-        if client is None:
-            out.append((label, False, "không tạo được client"))
-            continue
-        try:
-            resp = client.chat(model=AI_MODES["fast"]["model"],
-                               messages=[{"role": "user", "content": "Trả lời đúng một từ: OK"}],
-                               max_tokens=5, temperature=0)
-            out.append((label, True, "hoạt động"))
-        except Exception as e:
-            out.append((label, False, f"lỗi: {str(e)[:60]}"))
-    return out
-
-def menu_vision_ai():
-    """Menu cấu hình Vision AI"""
-    global VISION_AI_ENABLED, VISION_CHECK_INTERVAL_SEC
-
-    while True:
-        clear_screen()
-        section_title("VISION AI - PHÁT HIỆN MÀNG HÌNH")
-
-        print(f" Trạng thái: {C.GRN + 'BẬT' if VISION_AI_ENABLED else C.RED + 'TẮT'}{C.R}")
-        print(f" Tần suất kiểm tra: {VISION_CHECK_INTERVAL_SEC}s\n")
-        print(f"{C.GRY}Tính năng:{C.R}")
-        print(f"  • Phát hiện popup: Trade, Event, Maintenance")
-        print(f"  • Phát hiện nhân vật bị kẹt vào tường/địa hình")
-        print(f"  • Tự động xử lý popup (đóng hoặc trigger rejoin)")
-        print(f"  • Ghi log chi tiết mỗi lần phát hiện sự cố\n")
-
-        print(f"{C.LPUR}[1]{C.R} {'Tắt' if VISION_AI_ENABLED else 'Bật'} Vision AI")
-        print(f"{C.LPUR}[2]{C.R} Thay đổi tần suất kiểm tra (hiện: {VISION_CHECK_INTERVAL_SEC}s)")
-        print(f"{C.LPUR}[3]{C.R} Xem Vision AI alerts gần đây")
-        print(f"{C.RED}[0] Quay lại{C.R}\n")
-
-        sub = ask("Chọn:").strip()
-
-        if sub == "0":
-            return
-        elif sub == "1":
-            VISION_AI_ENABLED = not VISION_AI_ENABLED
-            msg_done(f"Vision AI đã {'BẬT' if VISION_AI_ENABLED else 'TẮT'}.")
-            time.sleep(1)
-        elif sub == "2":
-            try:
-                interval = int(ask(f"Nhập tần suất (giây, hiện: {VISION_CHECK_INTERVAL_SEC}):").strip() or VISION_CHECK_INTERVAL_SEC)
-                if 5 <= interval <= 300:
-                    VISION_CHECK_INTERVAL_SEC = interval
-                    msg_done(f"Tần suất kiểm tra đã đặt thành {interval}s.")
-                else:
-                    msg_err("Giá trị phải từ 5 đến 300 giây.")
-            except ValueError:
-                msg_err("Nhập sai định dạng.")
-            time.sleep(1)
-        elif sub == "3":
-            clear_screen()
-            section_title("VISION AI ALERTS")
-            if not VISION_ALERTS:
-                print(f"{C.GRY}Chưa có alert nào.{C.R}")
-            else:
-                for pkg, (alert_type, timestamp, desc) in list(VISION_ALERTS.items())[:10]:
-                    if alert_type:
-                        time_str = datetime.fromtimestamp(timestamp).strftime("%H:%M:%S")
-                        print(f"{C.YEL}{time_str}{C.R} [{tab_label(pkg)}] {alert_type}")
-            wait_enter()
-        else:
-            invalid_choice(sub)
-
-def menu_antiban_ai():
-    """Menu cấu hình Anti-Ban AI"""
-    global ANTIBAN_ENABLED, BAN_WAVE_THRESHOLD, BAN_WAVE_PAUSE_DURATION
-
-    while True:
-        clear_screen()
-        section_title("ANTI-BAN AI - PHÒNG CHỐNG WAVE BAN")
-
-        print(f" Trạng thái: {C.GRN + 'BẬT' if ANTIBAN_ENABLED else C.RED + 'TẮT'}{C.R}")
-        print(f" Ngưỡng wave: {BAN_WAVE_THRESHOLD} lỗi trong 5 phút")
-        print(f" Thời gian pause: {BAN_WAVE_PAUSE_DURATION//3600} giờ\n")
-
-        print(f"{C.GRY}Cách hoạt động:{C.R}")
-        print(f"  • Pattern 1: {BAN_WAVE_THRESHOLD}+ lỗi 262 trong 5 phút → Wave ban")
-        print(f"  • Pattern 2: >70% rejoin thất bại → Wave ban")
-        print(f"  • Pattern 3: 4+ tabs lỗi cùng lúc → Wave ban")
-        print(f"  • Tự động tạm dừng an toàn khi phát hiện wave\n")
-
-        print(f"{C.LPUR}[1]{C.R} {'Tắt' if ANTIBAN_ENABLED else 'Bật'} Anti-Ban AI")
-        print(f"{C.LPUR}[2]{C.R} Thay đổi ngưỡng wave ({BAN_WAVE_THRESHOLD} lỗi)")
-        print(f"{C.LPUR}[3]{C.R} Thay đổi thời gian pause ({BAN_WAVE_PAUSE_DURATION//3600}h)")
-        print(f"{C.LPUR}[4]{C.R} Xem ban wave history")
-        print(f"{C.RED}[0] Quay lại{C.R}\n")
-
-        sub = ask("Chọn:").strip()
-
-        if sub == "0":
-            return
-        elif sub == "1":
-            ANTIBAN_ENABLED = not ANTIBAN_ENABLED
-            msg_done(f"Anti-Ban AI đã {'BẬT' if ANTIBAN_ENABLED else 'TẮT'}.")
-            time.sleep(1)
-        elif sub == "2":
-            try:
-                threshold = int(ask(f"Nhập ngưỡng (hiện: {BAN_WAVE_THRESHOLD}, tối thiểu 3):").strip() or BAN_WAVE_THRESHOLD)
-                if threshold >= 3:
-                    BAN_WAVE_THRESHOLD = threshold
-                    msg_done(f"Ngưỡng wave đã đặt thành {threshold} lỗi.")
-                else:
-                    msg_err("Ngưỡng phải >= 3.")
-            except ValueError:
-                msg_err("Nhập sai định dạng.")
-            time.sleep(1)
-        elif sub == "3":
-            try:
-                duration = int(ask(f"Nhập thời gian pause (phút, hiện: {BAN_WAVE_PAUSE_DURATION//60}):").strip() or (BAN_WAVE_PAUSE_DURATION//60))
-                if 5 <= duration <= 360:
-                    BAN_WAVE_PAUSE_DURATION = duration * 60
-                    msg_done(f"Thời gian pause đã đặt thành {duration} phút.")
-                else:
-                    msg_err("Thời gian phải từ 5 đến 360 phút.")
-            except ValueError:
-                msg_err("Nhập sai định dạng.")
-            time.sleep(1)
-        elif sub == "4":
-            clear_screen()
-            section_title("BAN WAVE HISTORY")
-            if not BAN_PATTERN_HISTORY:
-                print(f"{C.GRY}Chưa ghi nhận lỗi nào.{C.R}")
-            else:
-                print(f"Tổng lỗi ghi nhận: {len(BAN_PATTERN_HISTORY)}\n")
-                for ts, error_type, pkg in list(BAN_PATTERN_HISTORY)[-15:]:
-                    time_str = datetime.fromtimestamp(ts).strftime("%H:%M:%S")
-                    print(f"{C.YEL}{time_str}{C.R} Error {error_type}" + (f" [{pkg}]" if pkg else ""))
-            wait_enter()
-        else:
-            invalid_choice(sub)
-
-
 def menu_ai_setup():
     while True:
         clear_screen()
@@ -10462,22 +9086,9 @@ def menu_ai_setup():
         d = _ai_usage_today()
         print(f" Module AI: {C.GRN + 'đã cài' if _HAS_AI_SDK else C.RED + 'chưa cài'}{C.R}")
         print(f" Phân tích lỗi: {C.GRN + 'BẬT' if AI_SETTINGS.get('analysis') else C.RED + 'TẮT'}{C.R}")
-        print(f" Vision AI: {C.GRN + 'BẬT' if VISION_AI_ENABLED else C.RED + 'TẮT'}{C.R}")
-        print(f" Anti-Ban AI: {C.GRN + 'BẬT' if ANTIBAN_ENABLED else C.RED + 'TẮT'}{C.R}")
         print(f" {C.GRY}Khóa đặt trong code. Khi khóa hết hạn mức, tool tự chuyển sang khóa kế tiếp.{C.R}\n")
-        for idx, label in enumerate(_ai_key_labels()):
-            used = int(d["keys"].get(str(idx), 0))
-            if not _ai_key_is_set(AI_KEYS_INLINE[idx]):
-                state = f"{C.GRY}chưa đặt{C.R}"
-            elif str(idx) in d["dead"]:
-                state = f"{C.RED}{d['dead'][str(idx)]} hôm nay{C.R}"
-            else:
-                state = f"{C.GRN}sẵn sàng{C.R}"
-            print(f" {label:<10} {_ai_masked_key(AI_KEYS_INLINE[idx]):<20} hôm nay {used}/{AI_QUOTA_LIMIT} · {state}")
         print()
         print(f"{C.LPUR}[1]{C.R} {C.WHT}Bật / tắt phân tích lỗi{C.R}")
-        print(f"{C.LPUR}[2]{C.R} {C.WHT}Vision AI - Phát hiện màn hình{C.R}")
-        print(f"{C.LPUR}[3]{C.R} {C.WHT}Anti-Ban AI - Phòng chống wave ban{C.R}")
         print(f"{C.RED}[0] Quay lại{C.R}\n")
         sub = ask("Chọn:").strip()
         if sub == "0":
@@ -10487,10 +9098,6 @@ def menu_ai_setup():
             save_config_file()
             msg_done(f"Phân tích lỗi đã {'BẬT' if AI_SETTINGS['analysis'] else 'TẮT'}.")
             time.sleep(1)
-        elif sub == "2":
-            menu_vision_ai()
-        elif sub == "4":
-            menu_antiban_ai()
         else:
             invalid_choice(sub)
 
@@ -10561,7 +9168,6 @@ HELP_PAGES = [
         "17  Anti-AFK: gửi thao tác nhẹ định kỳ (cần root).",
         "18  Nhạc YouTube: phát nhạc nền, có hẹn giờ, lịch sử và yêu thích.",
         "19  Dừng khẩn cấp: dừng ngay các tab và nhạc đang chạy.",
-        "9 trong Set up  Linh vật: bạn đồng hành nhỏ, có cảm xúc và trang phục.",
         "12  Xem log: lọc theo mức độ, tra mã lỗi, xuất log theo ngày.",
     ]),
 ]
@@ -10643,19 +9249,6 @@ def _selftest_cases():
     def t_redact():
         cfg = _redacted_config()
         return "webhook_url" not in cfg and "discord_uid" not in cfg
-    def t_sprites():
-        saved = dict(MASCOT)
-        ok = True
-        try:
-            for key in MASCOTS:
-                MASCOT["character"] = key
-                rows, name, _ = _mascot_sprite()
-                ok = ok and bool(rows) and bool(name)
-        finally:
-            MASCOT.clear(); MASCOT.update(saved)
-        return ok
-    def t_missions():
-        return _mascot_points() <= sum(p for _, _, p, _ in _mission_list())
     return [
         ("Kiểm tra Lua hợp lệ không báo lỗi", t_lua_ok),
         ("Kiểm tra Lua thiếu end phải báo lỗi", t_lua_bad),
@@ -10664,8 +9257,6 @@ def _selftest_cases():
         ("Tra mã lỗi Roblox", t_error_code),
         ("Lọc log theo mức độ", t_level),
         ("Cấu hình xuất ra đã ẩn webhook và Discord ID", t_redact),
-        ("Tất cả nhân vật linh vật đều vẽ được", t_sprites),
-        ("Điểm nhiệm vụ không vượt tổng", t_missions),
     ]
 
 TEXT_REVIEW_FILE = os.path.join(os.path.expanduser("~"), ".pain_text_review.txt")
@@ -10754,11 +9345,6 @@ def verify_and_start():
             show_help()
             continue
         menu_names = globals().get('MENU_NAMES', {})
-        if choice in menu_names:
-            try:
-                _habit_record(choice)
-            except Exception:
-                pass
         if choice not in menu_names:
             invalid_choice(choice)
             continue
@@ -10768,7 +9354,7 @@ def verify_and_start():
         if choice == "1":
             start_tool()
         elif choice == "2":
-            menu_rejoin_models()
+            menu_setup()
         elif choice == "3":
             menu_package_prefix()
         elif choice == "4":
