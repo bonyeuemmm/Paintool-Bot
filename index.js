@@ -32,18 +32,12 @@ if (!TOKEN || typeof TOKEN !== 'string' || TOKEN.trim() === '') {
 //
 // Bot sẽ load keys từ environment khi khởi động
 const COHERE_KEYS = {
-    0: process.env.COHERE_API_KEY_0 || '',
-    1: process.env.COHERE_API_KEY_1 || '',
-    2: process.env.COHERE_API_KEY_2 || '',
-    3: process.env.COHERE_API_KEY_3 || '',
-    4: process.env.COHERE_API_KEY_4 || '',
+    0: process.env.COHERE_API_KEY_0 || null,
+    1: process.env.COHERE_API_KEY_1 || null,
+    2: process.env.COHERE_API_KEY_2 || null,
+    3: process.env.COHERE_API_KEY_3 || null,
+    4: process.env.COHERE_API_KEY_4 || null,
 };
-
-// Kiểm tra số key đã load
-const COHERE_KEYS_COUNT = Object.values(COHERE_KEYS).filter(k => k && k.trim()).length;
-if (COHERE_KEYS_COUNT > 0) {
-    console.log(`✅ Đã tải ${COHERE_KEYS_COUNT} Cohere API key từ environment variables`);
-}
 
 const CLIENT_ID = process.env.CLIENT_ID;
 const MONGODB_URI = process.env.MONGODB_URI || process.env.MONGO_URI;
