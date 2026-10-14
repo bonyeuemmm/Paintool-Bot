@@ -36,7 +36,7 @@ except ImportError:
                     key, val = line.split('=', 1)
                     os.environ[key.strip()] = val.strip().strip('"').strip("'")
 
-VERSION = "v2.7.1"
+VERSION = "v3.1.6"
 
 # ==================== GLOBAL CONSTANTS (SERVER_URL / SECRET_KEY) ====================
 SERVER_URL = "https://paintool-bot.onrender.com/api/verify"
@@ -1211,6 +1211,20 @@ def load_saved_config():
     if isinstance(_ai, dict):
         AI_SETTINGS["analysis"] = bool(_ai.get("analysis", True))
         pass  # chế độ cố định là phân tích kỹ
+    _screen = data.get("screen_ai", {})
+    if isinstance(_screen, dict):
+        SCREEN_AI["enabled"] = bool(_screen.get("enabled", False))
+        if isinstance(_screen.get("interval_sec"), int):
+            SCREEN_AI["interval_sec"] = _screen["interval_sec"]
+        if isinstance(_screen.get("freeze_limit"), int):
+            SCREEN_AI["freeze_limit"] = _screen["freeze_limit"]
+    _ban = data.get("anti_ban", {})
+    if isinstance(_ban, dict):
+        ANTI_BAN["enabled"] = bool(_ban.get("enabled", False))
+        if isinstance(_ban.get("risk_threshold"), int):
+            ANTI_BAN["risk_threshold"] = _ban["risk_threshold"]
+        if isinstance(_ban.get("pause_minutes"), int):
+            ANTI_BAN["pause_minutes"] = _ban["pause_minutes"]
     _mt = data.get("music_timer", {})
     if isinstance(_mt, dict):
         MUSIC_TIMER["enabled"] = bool(_mt.get("enabled", False))
@@ -1378,6 +1392,16 @@ def _build_config_dict():
             "anti_afk": ANTI_AFK,
             "music_timer": MUSIC_TIMER,
             "ai_settings": AI_SETTINGS,
+            "screen_ai": {
+                "enabled": SCREEN_AI.get("enabled"),
+                "interval_sec": SCREEN_AI.get("interval_sec"),
+                "freeze_limit": SCREEN_AI.get("freeze_limit"),
+            },
+            "anti_ban": {
+                "enabled": ANTI_BAN.get("enabled"),
+                "risk_threshold": ANTI_BAN.get("risk_threshold"),
+                "pause_minutes": ANTI_BAN.get("pause_minutes"),
+            },
             # API key không được lưu
             # "ai_api_key": AI_API_KEY,
             # "ai_enabled": AI_ENABLED
@@ -1420,27 +1444,53 @@ def clear_screen():
     else:
         os.system('clear')
 
-def print_ascii_banner():
-    P1 = "\033[38;5;129m"   # tím sáng
-    P2 = "\033[38;5;135m"   # tím trung
-    P3 = "\033[38;5;141m"   # tím nhạt
-    W  = "\033[1;97m"       # trắng sáng
-    DW = "\033[38;5;189m"   # trắng tím nhạt
-    AC = "\033[38;5;183m"   # tím pastel (accent)
-    LN = "\033[38;5;240m"   # xám đường viền
-    RS = "\033[0m"
+_BANNER_FONT = {
+    "P": ["██████╗ ", "██╔══██╗", "██████╔╝", "██╔═══╝ ", "██║     ", "╚═╝     "],
+    "A": [" █████╗ ", "██╔══██╗", "███████║", "██╔══██║", "██║  ██║", "╚═╝  ╚═╝"],
+    "I": ["██╗", "██║", "██║", "██║", "██║", "╚═╝"],
+    "N": ["███╗   ██╗", "████╗  ██║", "██╔██╗ ██║", "██║╚██╗██║", "██║ ╚████║", "╚═╝  ╚═══╝"],
+    "R": ["██████╗ ", "██╔══██╗", "██████╔╝", "██╔══██╗", "██║  ██║", "╚═╝  ╚═╝"],
+    "E": ["███████╗", "██╔════╝", "█████╗  ", "██╔══╝  ", "███████╗", "╚══════╝"],
+    "J": ["     ██╗", "     ██║", "     ██║", "██   ██║", "╚█████╔╝", " ╚════╝ "],
+    "O": [" ██████╗ ", "██╔═══██╗", "██║   ██║", "██║   ██║", "╚██████╔╝", " ╚═════╝ "],
+}
 
-    print(f"""
-{LN}  ╔══════════════════════════════════════════════════════════════╗{RS}
-{LN}  ║{RS}                                                              {LN}║{RS}
-{LN}  ║{RS}  {P1}██████╗ {P2} █████╗ {P3}██╗{W}███╗  ██╗    {P1}██████╗ {W}███████╗{P2}     {W}██╗{P3}███╗  {P1}██╗{RS}  {LN}║{RS}
-{LN}  ║{RS}  {P1}██╔══██╗{P2}██╔══██╗{P3}██║{W}████╗ ██║    {P1}██╔══██╗{W}██╔════╝{P2}     {W}██║{P3}████╗ {P1}██║{RS}  {LN}║{RS}
-{LN}  ║{RS}  {P1}██████╔╝{P2}███████║{P3}██║{W}██╔██╗██║    {P1}██████╔╝{W}█████╗  {P2}     {W}██║{P3}██╔██╗{P1}██║{RS}  {LN}║{RS}
-{LN}  ║{RS}  {P1}██╔═══╝ {P2}██╔══██║{P3}██║{W}██║╚████║    {P1}██╔══██╗{W}██╔══╝  {P2}     {W}██║{P3}██║╚████║{RS}  {LN}║{RS}
-{LN}  ║{RS}  {P1}██║     {P2}██║  ██║{P3}██║{W}██║ ╚███║    {P1}██║  ██║{W}███████╗{P2}     {W}██║{P3}██║ ╚███║{RS}  {LN}║{RS}
-{LN}  ║{RS}  {P3}╚═╝     ╚═╝  ╚═╝╚═╝╚═╝  ╚══╝    ╚═╝  ╚═╝╚══════╝     ╚═╝╚═╝  ╚══╝{RS}  {LN}║{RS}
-{LN}  ║{RS}                                                              {LN}║{RS}
-{LN}  ╚══════════════════════════════════════════════════════════════╝{RS}""")
+def _banner_word_rows(word):
+    rows = [""] * 6
+    for ch in word:
+        glyph = _BANNER_FONT[ch]
+        w = max(len(r) for r in glyph)
+        for i in range(6):
+            rows[i] += glyph[i].ljust(w) + " "
+    return [r.rstrip() for r in rows]
+
+def print_ascii_banner():
+    """Banner lớn: PAIN / REJOIN, chữ tím chuyển dần sang trắng."""
+    LN = "\033[38;5;240m"  # viền
+    RS = "\033[0m"
+    grad = [
+        "\033[1;38;5;129m",
+        "\033[1;38;5;135m",
+        "\033[1;38;5;141m",
+        "\033[1;38;5;147m",
+        "\033[1;38;5;189m",
+        "\033[1;97m",
+    ]
+    inner = 62
+
+    def boxed(text_plain, text_ansi=None):
+        shown = text_ansi if text_ansi is not None else text_plain
+        pad = max(0, inner - 2 - len(text_plain))
+        return f"{LN}  ║{RS}  {shown}{' ' * pad}{LN}║{RS}"
+
+    print(f"{LN}  ╔{'═' * inner}╗{RS}")
+    print(boxed(""))
+    for word in ("PAIN", "REJOIN"):
+        for i, row in enumerate(_banner_word_rows(word)):
+            print(boxed(row, f"{grad[i]}{row}{RS}"))
+        print(boxed(""))
+    print(f"{LN}  ╚{'═' * inner}╝{RS}")
+
 
 # ==================== UI HELPERS ====================
 class C:
@@ -2061,8 +2111,8 @@ def license_screen(hwid, note=None):
     vw = w - 4 - lw - 1
     info = get_system_info()
     print(box_top(w))
-    print(box_row(f"{C.WHT}XÁC THỰC BẢN QUYỀN{C.R}", w, "center"))
-    print(box_row(f"{C.GRY}Nhập key để kích hoạt tool{C.R}", w, "center"))
+    print(box_row(f"{C.WHT}PAIN TOOL REJOIN PREMIUM{C.R}", w, "center"))
+    print(box_row(f"{C.GRY}vui lòng nhập key để vào menu chính!{C.R}", w, "center"))
     print(box_sep(w))
     print(box_kv("Trạng thái", f"{dot(False)} {C.RED}Chưa kích hoạt{C.R}", w, lw))
     print(box_kv("Thiết bị", clip(f"{info['model']} · Android {info['android']}", vw), w, lw))
@@ -2289,6 +2339,275 @@ AI_MODES = {
 }
 AI_SETTINGS = {"analysis": True, "mode": "deep"}   # khóa API nằm trong code, không lưu vào cấu hình
 
+# ==================== PAIN AI: SCREEN + ANTI-BAN ====================
+SCREEN_AI = {
+    "enabled": False,
+    "interval_sec": 45,
+    "freeze_limit": 3,
+    "white_threshold": 0.92,
+    "black_threshold": 0.08,
+    "last_check": {},
+    "freeze_streak": {},
+    "last_hash": {},
+}
+
+ANTI_BAN = {
+    "enabled": False,
+    "pause_minutes": 45,
+    "risk_threshold": 70,
+    "window_sec": 3600,
+    "error_262": [],
+    "rejoin_fail": [],
+    "cookie_change": [],
+    "wave_hits": [],
+    "paused": False,
+    "pause_until": 0.0,
+    "last_risk": 0,
+}
+
+def _capture_frame(pkg):
+    path = f"/sdcard/pain_ai_{pkg.replace('.', '_')}.png"
+    sh(f"screencap -p {shlex.quote(path)}", timeout=8)
+    return path if os.path.exists(path) else None
+
+def _frame_luminance_stats(path):
+    try:
+        out = sh(
+            f"python3 -c \""
+            f"from PIL import Image; import statistics; "
+            f"im=Image.open('{path}').convert('L').resize((64,36)); "
+            f"px=list(im.getdata()); "
+            f"print(statistics.mean(px)/255, min(px)/255, max(px)/255)\"",
+            timeout=12,
+        )
+        parts = [float(x) for x in (out or "").split()]
+        if len(parts) >= 3:
+            return {"mean": parts[0], "min": parts[1], "max": parts[2]}
+    except Exception:
+        pass
+    return None
+
+def _frame_hash(path):
+    try:
+        out = sh(f"md5sum {shlex.quote(path)} 2>/dev/null | cut -c1-16", timeout=5)
+        return (out or "").strip() or None
+    except Exception:
+        return None
+
+def analyze_screen_state(pkg):
+    path = _capture_frame(pkg)
+    if not path:
+        return "capture_fail"
+    stats = _frame_luminance_stats(path)
+    h = _frame_hash(path)
+    try:
+        os.remove(path)
+    except Exception:
+        pass
+    if not stats:
+        return "analyze_fail"
+    mean = stats["mean"]
+    if mean >= SCREEN_AI["white_threshold"]:
+        return "white"
+    if mean <= SCREEN_AI["black_threshold"]:
+        return "black"
+    prev = SCREEN_AI["last_hash"].get(pkg)
+    SCREEN_AI["last_hash"][pkg] = h
+    if prev and h and prev == h:
+        return "freeze"
+    return "ok"
+
+def screen_ai_handle(pkg, state):
+    streak = SCREEN_AI["freeze_streak"]
+    if state in ("white", "black", "freeze"):
+        streak[pkg] = streak.get(pkg, 0) + 1
+        log_event("SCREEN_AI", pkg, f"state={state} streak={streak[pkg]}")
+        if streak[pkg] >= SCREEN_AI["freeze_limit"]:
+            streak[pkg] = 0
+            log_event("SCREEN_AI", pkg, "freeze_limit -> kill+reopen")
+            try:
+                sh(f"am force-stop {shlex.quote(pkg)}", timeout=8)
+                time.sleep(2)
+                open_game(pkg, enter_map=True)
+                REJOIN_COUNT[pkg] = REJOIN_COUNT.get(pkg, 0) + 1
+                notify_async("warn", "AI Screen Recovery", f"{pkg} phat hien {state}, da kill va mo lai.", pkg=pkg)
+            except Exception as e:
+                log_event("SCREEN_AI_ERR", pkg, str(e))
+    else:
+        streak[pkg] = 0
+
+def screen_ai_tick(packages):
+    if not SCREEN_AI.get("enabled"):
+        return
+    now = time.time()
+    interval = max(20, int(SCREEN_AI.get("interval_sec", 45)))
+    for pkg in packages or []:
+        if now - SCREEN_AI["last_check"].get(pkg, 0) < interval:
+            continue
+        if not is_app_running(pkg):
+            continue
+        SCREEN_AI["last_check"][pkg] = now
+        try:
+            state = analyze_screen_state(pkg)
+            screen_ai_handle(pkg, state)
+        except Exception as e:
+            log_event("SCREEN_AI_ERR", pkg, str(e))
+
+def antiban_record(event, pkg=None):
+    if not ANTI_BAN.get("enabled"):
+        return
+    now = time.time()
+    window = ANTI_BAN["window_sec"]
+    def _push(key):
+        ANTI_BAN[key].append(now)
+        ANTI_BAN[key] = [t for t in ANTI_BAN[key] if now - t <= window]
+    if event == "262":
+        _push("error_262")
+    elif event == "rejoin_fail":
+        _push("rejoin_fail")
+    elif event == "cookie_change":
+        _push("cookie_change")
+    elif event == "wave":
+        _push("wave_hits")
+    antiban_evaluate()
+
+def antiban_calc_risk():
+    now = time.time()
+    window = ANTI_BAN["window_sec"]
+    def _count(key):
+        return len([t for t in ANTI_BAN.get(key, []) if now - t <= window])
+    c262 = _count("error_262")
+    fail = _count("rejoin_fail")
+    cookie = _count("cookie_change")
+    wave = _count("wave_hits")
+    score = 0
+    score += min(40, c262 * 12)
+    score += min(30, fail * 8)
+    score += min(20, cookie * 10)
+    score += min(25, wave * 15)
+    if c262 >= 3 and fail >= 3:
+        score += 15
+    return min(100, score), {"262": c262, "fail": fail, "cookie": cookie, "wave": wave}
+
+def antiban_evaluate():
+    risk, detail = antiban_calc_risk()
+    ANTI_BAN["last_risk"] = risk
+    th = ANTI_BAN.get("risk_threshold", 70)
+    if risk >= th and not ANTI_BAN.get("paused"):
+        mins = int(ANTI_BAN.get("pause_minutes", 45))
+        ANTI_BAN["paused"] = True
+        ANTI_BAN["pause_until"] = time.time() + mins * 60
+        log_event("ANTIBAN", detail=f"risk={risk} {detail} -> PAUSE {mins}m")
+        notify_async("warn", "AI Anti-Ban Pause", f"Risk {risk}% (262={detail['262']} fail={detail['fail']} cookie={detail['cookie']} wave={detail['wave']}). Tam dung rejoin {mins} phut.")
+        return True
+    return False
+
+def antiban_is_paused():
+    if not ANTI_BAN.get("enabled") or not ANTI_BAN.get("paused"):
+        return False
+    now = time.time()
+    if now >= ANTI_BAN.get("pause_until", 0):
+        ANTI_BAN["paused"] = False
+        ANTI_BAN["pause_until"] = 0.0
+        log_event("ANTIBAN", detail="pause expired -> resume")
+        notify_async("success", "AI Anti-Ban Resume", "Het thoi gian tam dung, tiep tuc rejoin.")
+        return False
+    return True
+
+def antiban_on_error_code(pkg, code):
+    code = str(code)
+    if code == "262":
+        antiban_record("262", pkg)
+    if code in ("267", "268", "279", "277"):
+        antiban_record("wave", pkg)
+
+def antiban_on_rejoin_fail(pkg):
+    antiban_record("rejoin_fail", pkg)
+
+def antiban_on_cookie_change(pkg):
+    antiban_record("cookie_change", pkg)
+
+def antiban_tick():
+    if not ANTI_BAN.get("enabled"):
+        return
+    antiban_is_paused()
+    antiban_evaluate()
+
+def setup_screen_ai():
+    clear_screen()
+    section_title("AI DOC MAN HINH")
+    print(f" Trang thai: {'BAT' if SCREEN_AI.get('enabled') else 'TAT'}")
+    print(f" Chu ky quet: {SCREEN_AI.get('interval_sec', 45)}s")
+    print(f" Nguong freeze: {SCREEN_AI.get('freeze_limit', 3)}")
+    print()
+    print(" [1] Bat/Tat")
+    print(" [2] Dat chu ky quet (20-180)")
+    print(" [3] Dat nguong freeze (2-8)")
+    print(" [0] Quay lai")
+    sub = ask("Chon:").strip()
+    if sub == "1":
+        SCREEN_AI["enabled"] = not SCREEN_AI.get("enabled")
+        save_config_file()
+        msg_done(f"AI Screen: {'BAT' if SCREEN_AI['enabled'] else 'TAT'}")
+    elif sub == "2":
+        v = ask("Chu ky (giay):").strip()
+        if v.isdigit() and 20 <= int(v) <= 180:
+            SCREEN_AI["interval_sec"] = int(v)
+            save_config_file()
+            msg_done(f"Chu ky = {v}s")
+    elif sub == "3":
+        v = ask("Nguong freeze:").strip()
+        if v.isdigit() and 2 <= int(v) <= 8:
+            SCREEN_AI["freeze_limit"] = int(v)
+            save_config_file()
+            msg_done(f"Nguong = {v}")
+    time.sleep(1)
+
+def setup_antiban():
+    clear_screen()
+    section_title("AI ANTI-BAN")
+    risk, detail = antiban_calc_risk()
+    print(f" Trang thai: {'BAT' if ANTI_BAN.get('enabled') else 'TAT'}")
+    print(f" Risk: {risk}% | 262={detail['262']} fail={detail['fail']} cookie={detail['cookie']} wave={detail['wave']}")
+    print(f" Nguong pause: {ANTI_BAN.get('risk_threshold', 70)}%")
+    print(f" Thoi gian pause: {ANTI_BAN.get('pause_minutes', 45)} phut")
+    if ANTI_BAN.get("paused"):
+        left = max(0, int(ANTI_BAN.get("pause_until", 0) - time.time()))
+        print(f" DANG TAM DUNG con {left // 60}p{left % 60}s")
+    print()
+    print(" [1] Bat/Tat")
+    print(" [2] Dat nguong risk (40-95)")
+    print(" [3] Dat thoi gian pause (15-180)")
+    print(" [4] Reset bo dem")
+    print(" [0] Quay lai")
+    sub = ask("Chon:").strip()
+    if sub == "1":
+        ANTI_BAN["enabled"] = not ANTI_BAN.get("enabled")
+        if not ANTI_BAN["enabled"]:
+            ANTI_BAN["paused"] = False
+        save_config_file()
+        msg_done(f"Anti-Ban: {'BAT' if ANTI_BAN['enabled'] else 'TAT'}")
+    elif sub == "2":
+        v = ask("Nguong risk:").strip()
+        if v.isdigit() and 40 <= int(v) <= 95:
+            ANTI_BAN["risk_threshold"] = int(v)
+            save_config_file()
+            msg_done(f"Nguong = {v}%")
+    elif sub == "3":
+        v = ask("Phut pause:").strip()
+        if v.isdigit() and 15 <= int(v) <= 180:
+            ANTI_BAN["pause_minutes"] = int(v)
+            save_config_file()
+            msg_done(f"Pause = {v} phut")
+    elif sub == "4":
+        for k in ("error_262", "rejoin_fail", "cookie_change", "wave_hits"):
+            ANTI_BAN[k] = []
+        ANTI_BAN["paused"] = False
+        ANTI_BAN["last_risk"] = 0
+        save_config_file()
+        msg_done("Da reset")
+    time.sleep(1)
+
 def _ai_usage_today():
     """Trạng thái hôm nay: lượt đã dùng theo từng khóa, khóa nào đã hết. Tự đặt lại khi sang ngày mới."""
     today = datetime.now().strftime("%Y-%m-%d")
@@ -2327,54 +2646,6 @@ def _ai_masked_key(key=None):
     if not _ai_key_is_set(k):
         return "chưa đặt"
     return f"đã đặt (…{k[-4:]})" if len(k) > 4 else "đã đặt"
-
-def show_ai_quota_status():
-    """Hiển thị trạng thái quota của tất cả 5 API key"""
-    clear_screen()
-    section_title("TRẠNG THÁI API COHERE (1 CHÍNH + 4 DỰ PHÒNG)")
-    print()
-    
-    d = _ai_usage_today()
-    labels = _ai_key_labels()
-    
-    total_used = 0
-    for i, key in enumerate(AI_KEYS_INLINE):
-        key_name = labels[i]
-        is_set = _ai_key_is_set(key)
-        
-        if not is_set:
-            print(f"  {i}: {key_name:15} | 🔴 Chưa đặt key")
-            continue
-        
-        quota_used = int(d["keys"].get(str(i), 0))
-        quota_remain = max(0, AI_QUOTA_LIMIT - quota_used)
-        total_used += quota_used
-        
-        if str(i) in d["dead"]:
-            reason = d["dead"][str(i)]
-            print(f"  {i}: {key_name:15} | 🔴 HẾT QUOTA ({reason})")
-        elif quota_remain > 0:
-            pct = int((quota_used / AI_QUOTA_LIMIT) * 100)
-            print(f"  {i}: {key_name:15} | 🟢 Dùng: {quota_used:5}/{AI_QUOTA_LIMIT} | Còn: {quota_remain:5} ({pct}%)")
-        else:
-            print(f"  {i}: {key_name:15} | 🔴 HẾT QUOTA (đã dùng {quota_used}/{AI_QUOTA_LIMIT})")
-    
-    print()
-    print(f"📊 Tổng lượt dùng hôm nay: {total_used} lượt")
-    print(f"📅 Ngày: {d.get('date', '?')}")
-    print()
-    wait_enter()
-
-def reset_ai_quota():
-    """Reset quota của tất cả API key"""
-    if ask("Xác nhận reset quota tất cả 5 API? [y/n]: ").lower() == 'y':
-        d = {"date": datetime.now().strftime("%Y-%m-%d"), "keys": {}, "dead": {}}
-        _ai_save_state(d)
-        msg_done("✅ Đã reset quota tất cả 5 API key. Quota sẽ đặt lại vào ngày mai.")
-        time.sleep(1.5)
-    else:
-        msg_cancel("Đã hủy reset quota.")
-        time.sleep(0.8)
 
 def _ai_pick_key(exclude=()):
     """Khóa đầu tiên còn dùng được hôm nay: đã đặt, chưa hết, chưa bị đánh dấu lỗi."""
@@ -3962,15 +4233,16 @@ def start_tool():
             if GAME_STATUS_PAUSED:
                 pass
             elif AUTO_REJOIN_MODE == 1:
-                for pkg in packages:
-                    if stop_start: break
-                    reason = detect_problem(pkg)
-                    if reason:
-                        recover_tab(pkg, reason)
-                if not stop_start:
-                    for pkg, why_screen in screen_guard(packages):
+                if not antiban_is_paused():
+                    for pkg in packages:
                         if stop_start: break
-                        recover_tab(pkg, why_screen)
+                        reason = detect_problem(pkg)
+                        if reason:
+                            recover_tab(pkg, reason)
+                    if not stop_start:
+                        for pkg, why_screen in screen_guard(packages):
+                            if stop_start: break
+                            recover_tab(pkg, why_screen)
 
             elif AUTO_REJOIN_MODE == 2:
                 if elapsed_minutes >= DELAY_REJOIN_MINUTES:
@@ -4012,6 +4284,14 @@ def start_tool():
                 license_guard_tick()
                 try:
                     anti_afk_tick()
+                except Exception:
+                    pass
+                try:
+                    screen_ai_tick(packages)
+                except Exception:
+                    pass
+                try:
+                    antiban_tick()
                 except Exception:
                     pass
                 try:
@@ -4534,9 +4814,17 @@ def show_banner():
     print(box_kv("Pin / Root", f"{bat_col}{info['battery']}{C.R} {C.GRY}·{C.R} {root_txt}", w, lw))
     print(box_sep(w))
     print(box_row(f"{C.PUR}▸ TRẠNG THÁI{C.R}", w))
-    target_link = globals().get('TARGET_LINK')
-    selected_game = globals().get('SELECTED_GAME_NAME', 'Chưa chọn')
-    print(box_kv("Game", f"{dot(bool(target_link) or None)} {C.WHT}{clip(selected_game, vw - 2)}{C.R}", w, lw))
+    _installed = _ttl("pkgs", 20, list_installed_packages) or []
+    _bound = sum(1 for p in _installed if p in PACKAGE_GAMES)
+    if not _installed:
+        _game_txt = f"{dot(False)} {C.GRY}Chưa có package{C.R}"
+    elif _bound == 0:
+        _game_txt = f"{dot(False)} {C.GRY}0/{len(_installed)} package đã gắn game{C.R}"
+    elif _bound < len(_installed):
+        _game_txt = f"{dot(None)} {C.YEL}{_bound}/{len(_installed)} package đã gắn game{C.R}"
+    else:
+        _game_txt = f"{dot(True)} {C.GRN}{_bound}/{len(_installed)} package đã gắn game{C.R}"
+    print(box_kv("Game", _game_txt, w, lw))
     package_prefix = globals().get('PACKAGE_PREFIX', '')
     print(box_kv("Package", f"{dot(n_tabs > 0)} {C.WHT}{clip(package_prefix, vw - 12)}{C.R} {C.GRY}({n_tabs} tab){C.R}", w, lw))
     print(box_kv("Rejoin", f"{dot(True)} {C.WHT}{clip(get_rejoin_mode_str(), vw - 2)}{C.R}", w, lw))
@@ -7885,8 +8173,6 @@ MENU_NAMES = {
     "17": "Anti-AFK",
     "18": "Nghe nhạc YouTube",
     "19": "Dừng khẩn cấp",
-    "20": "Trạng Thái API Cohere (1 Chính + 4 Dự Phòng)",
-    "21": "Reset Quota API Cohere",
     "0": "Thoát",
 }
 
@@ -8038,7 +8324,7 @@ def search_packages_by_keyword():
             f"{C.WHT}TÌM KIẾM PACKAGE{C.R}",
             f"{C.GRY}{'─' * max(10, min(cols - 1, 60))}{C.R}",
             f"{C.GRY}Tổng {len(packages)} · Hiện {len(shown)} · Trang {cur_page}/{pages}{C.R}",
-            f"{C.GRY}Chạm package để copy · Gõ để lọc · +/- đổi trang · Enter thoát{C.R}",
+            f"{C.GRY}Chạm để copy · Gõ để lọc · +/- đổi trang · Enter thoát{C.R}",
         ]
         width = max(10, cols - 6)
         for r in range(ps):
@@ -8058,6 +8344,10 @@ def search_packages_by_keyword():
         rows.append(f"{msg_color}{state['msg']}{C.R}")
         # Vẽ đè từ đầu màn hình, mỗi dòng xóa phần thừa; không xóa cả màn hình
         out = ["\033[H"]
+        if not state.get("inited"):
+            # Lần vẽ đầu: xóa sạch màn hình để không còn nội dung menu phía trên
+            out = ["\033[2J\033[H"]
+            state["inited"] = True
         for i, line in enumerate(rows):
             out.append(line + "\033[K")
             if i < len(rows) - 1:
@@ -8083,6 +8373,26 @@ def search_packages_by_keyword():
         else:
             state["msg"] = f"Không copy được (cần Termux:API hoặc xclip). Tên: {pkg}"
 
+    def edit_filter():
+        """Tạm thoát chế độ chạm để nhập lọc bằng input(), bàn phím sẽ hiện."""
+        sys.stdout.write("\033[?1006l\033[?1000l")
+        sys.stdout.flush()
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_attr)
+        try:
+            print()
+            new = input(f"{C.WHT}Lọc (Enter để xóa lọc):{C.R} ").strip().lower()
+            state["filt"] = new
+            state["offset"] = 0
+            state["msg"] = ""
+        except (EOFError, KeyboardInterrupt):
+            pass
+        finally:
+            tty.setcbreak(fd)
+            sys.stdout.write("\033[?1000h\033[?1006h")
+            sys.stdout.flush()
+            state.pop("inited", None)  # vẽ lại toàn màn hình, xóa dòng nhập
+            draw()
+
     def handle_mouse(b, x, y, press):
         if not press:
             return
@@ -8092,6 +8402,9 @@ def search_packages_by_keyword():
             state["offset"] = max(0, state["offset"])
             return
         if (b & 0x20) == 0 and (b & 3) == 0:  # chạm / nhấn chuột trái
+            if y == HEADER_ROWS + page_size() + 2:  # hàng "Lọc:"
+                state["edit"] = True
+                return
             copy_index(row_to_index(y))
 
     old_mode = None
@@ -8121,6 +8434,9 @@ def search_packages_by_keyword():
                         handle_mouse(b_, x_, y_, seq[-1:] == b"M")
                     except Exception:
                         pass
+                if state.pop("edit", False):
+                    edit_filter()
+                    continue
                 draw()
                 continue
             if ch in (b"\r", b"\n"):
@@ -9140,8 +9456,12 @@ def menu_ai_setup():
         d = _ai_usage_today()
         print(f" Module AI: {C.GRN + 'đã cài' if _HAS_AI_SDK else C.RED + 'chưa cài'}{C.R}")
         print(f" Phân tích lỗi: {C.GRN + 'BẬT' if AI_SETTINGS.get('analysis') else C.RED + 'TẮT'}{C.R}")
+        print(f" AI Screen: {C.GRN + 'BẬT' if SCREEN_AI.get('enabled') else C.RED + 'TẮT'}{C.R}")
+        print(f" AI Anti-Ban: {C.GRN + 'BẬT' if ANTI_BAN.get('enabled') else C.RED + 'TẮT'}{C.R} (risk={ANTI_BAN.get('last_risk', 0)}%)")
         print()
         print(f"{C.LPUR}[1]{C.R} {C.WHT}Bật / tắt phân tích lỗi{C.R}")
+        print(f"{C.LPUR}[2]{C.R} {C.WHT}AI Đọc Màn Hình & Tự Động Xử Lý{C.R}")
+        print(f"{C.LPUR}[3]{C.R} {C.WHT}AI Nhận Diện & Tránh Bẫy Ban{C.R}")
         print(f"{C.RED}[0] Quay lại{C.R}\n")
         sub = ask("Chọn:").strip()
         if sub == "0":
@@ -9151,6 +9471,10 @@ def menu_ai_setup():
             save_config_file()
             msg_done(f"Phân tích lỗi đã {'BẬT' if AI_SETTINGS['analysis'] else 'TẮT'}.")
             time.sleep(1)
+        elif sub == "2":
+            setup_screen_ai()
+        elif sub == "3":
+            setup_antiban()
         else:
             invalid_choice(sub)
 
@@ -9443,12 +9767,6 @@ def verify_and_start():
             menu_music()
         elif choice == "19":
             emergency_stop()
-        elif choice == "20":
-            announce_choice("20", MENU_NAMES["20"])
-            show_ai_quota_status()
-        elif choice == "21":
-            announce_choice("21", MENU_NAMES["21"])
-            reset_ai_quota()
 
 
 if __name__ == "__main__":
