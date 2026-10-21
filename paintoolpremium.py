@@ -39,7 +39,7 @@ except ImportError:
 VERSION = "v3.1.6"
 
 # ==================== GLOBAL CONSTANTS (SERVER_URL / SECRET_KEY) ====================
-SERVER_URL = "https://paintool-bot.onrender.com/api/verify"
+SERVER_URL = "https://pain-tool-rejoin-bot.apps.bot-hosting.cloud/api/verify"
 SECRET_KEY = "PainGamerSecretKey2156#VipTool"
 API_URL = SERVER_URL   # alias cũ giữ tương thích
 
@@ -485,7 +485,7 @@ LOW_RAM_COOLDOWN_SEC = 300
 _LOW_RAM_LAST = 0
 
 # ---- Kiểm tra cập nhật ----
-UPDATE_URL = "https://paintool-bot.onrender.com/api/version"
+UPDATE_URL = "https://pain-tool-rejoin-bot.apps.bot-hosting.cloud/api/version"
 UPDATE_INFO = {"latest": None, "status": None, "checked_at": 0.0}
 UPDATE_CACHE_SEC = 600  # kết quả "mới nhất"/"có bản mới" được dùng lại trong 10 phút
 
@@ -2149,7 +2149,7 @@ def notify_bot_hwid_linked(key_str, hwid_str, discord_id=""):
 
         cmd = [
             "curl", "-s", "-X", "POST",
-            "https://paintool-bot.onrender.com/api/link-hwid",
+            "https://pain-tool-rejoin-bot.apps.bot-hosting.cloud/api/link-hwid",
             "-H", "Content-Type: application/json",
             "-d", json.dumps(payload),
             "--max-time", "5"
@@ -8843,7 +8843,7 @@ def menu_screen_guard():
         else:
             invalid_choice(sub)
 
-UPDATE_DOWNLOAD_URL = "https://paintool-bot.onrender.com/api/download/latest"
+UPDATE_DOWNLOAD_URL = "https://pain-tool-rejoin-bot.apps.bot-hosting.cloud/api/download/latest"
 
 def _download_and_verify_update(latest):
     """Tải bản mới vào file tạm và kiểm tra trước khi dùng.
