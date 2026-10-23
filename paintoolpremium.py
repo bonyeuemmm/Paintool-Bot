@@ -36,7 +36,7 @@ except ImportError:
                     key, val = line.split('=', 1)
                     os.environ[key.strip()] = val.strip().strip('"').strip("'")
 
-VERSION = "v3.1.6"
+VERSION = "v3.1.8"
 
 # ==================== GLOBAL CONSTANTS (SERVER_URL / SECRET_KEY) ====================
 SERVER_URL = "https://pain-tool-rejoin-bot.apps.bot-hosting.cloud/api/verify"
