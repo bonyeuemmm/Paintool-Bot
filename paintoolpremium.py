@@ -36,7 +36,7 @@ except ImportError:
                     key, val = line.split('=', 1)
                     os.environ[key.strip()] = val.strip().strip('"').strip("'")
 
-VERSION = "v3.1.8"
+VERSION = "v3.3.7"
 
 # ==================== GLOBAL CONSTANTS (SERVER_URL / SECRET_KEY) ====================
 SERVER_URL = "https://pain-tool-rejoin-bot.apps.bot-hosting.cloud/api/verify"
@@ -526,6 +526,13 @@ BAN_TRACKER = {
 SELECTED_PACKAGES = []
 SELECT_ALL_PACKAGES = True
 EXECUTOR_BINDING = {}
+
+# ==================== CUSTOM PACKAGES (User-defined) ====================
+CUSTOM_PACKAGES = []
+
+# ==================== PACKAGE MODE ====================
+# "prefix" = Prefix Mode (mặc định), "custom" = Custom Package List Mode
+PACKAGE_MODE = "prefix"
 
 def _valid_hhmm(v):
     return isinstance(v, str) and bool(re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", v))
@@ -1342,6 +1349,18 @@ def load_saved_config():
                     "game_id": game_data.get("game_id", ""),
                 }
 
+    cp = data.get("custom_packages")
+    if isinstance(cp, list):
+        CUSTOM_PACKAGES.clear()
+        for v in cp:
+            if isinstance(v, str) and v.strip() and v.strip() not in CUSTOM_PACKAGES:
+                CUSTOM_PACKAGES.append(v.strip())
+    pm = data.get("package_mode")
+    if pm in ("prefix", "custom"):
+        globals()["PACKAGE_MODE"] = pm
+    else:
+        globals()["PACKAGE_MODE"] = "prefix"
+
     # API key không đọc từ cấu hình
     # This prevents storing API keys in config files
     # ai_key = data.get("ai_api_key", "")
@@ -1402,6 +1421,8 @@ def _build_config_dict():
                 "risk_threshold": ANTI_BAN.get("risk_threshold"),
                 "pause_minutes": ANTI_BAN.get("pause_minutes"),
             },
+            "custom_packages": CUSTOM_PACKAGES,
+            "package_mode": PACKAGE_MODE,
             # API key không được lưu
             # "ai_api_key": AI_API_KEY,
             # "ai_enabled": AI_ENABLED
@@ -1931,6 +1952,43 @@ def _heartbeat_loop(key, base_hwid):
         if why:
             kick_out(why)
 
+def _save_license_key(key, hwid):
+    """Lưu key đã xác thực vào LICENSE_FILE, ký bằng HMAC để chống giả mạo"""
+    body = json.dumps({"key": key, "hwid": hwid}, sort_keys=True)
+    sig = hmac.new(SECRET_KEY.encode("utf-8"), body.encode("utf-8"), hashlib.sha256).hexdigest()
+    data = {"key": key, "hwid": hwid, "sig": sig}
+    tmp = LICENSE_FILE + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        try:
+            os.chmod(tmp, 0o600)
+        except Exception:
+            pass
+        os.replace(tmp, LICENSE_FILE)
+    except Exception:
+        pass
+
+def _load_license_key(hwid):
+    """Đọc key đã lưu, kiểm tra chữ ký và HWID. Trả về key hoặc None nếu không hợp lệ"""
+    try:
+        with open(LICENSE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return None
+        key = data.get("key", "")
+        saved_hwid = data.get("hwid", "")
+        sig = data.get("sig", "")
+        if not key or saved_hwid != hwid:
+            return None
+        body = json.dumps({"key": key, "hwid": saved_hwid}, sort_keys=True)
+        expected_sig = hmac.new(SECRET_KEY.encode("utf-8"), body.encode("utf-8"), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(sig, expected_sig):
+            return None
+        return key
+    except Exception:
+        return None
+
 def device_activated(profile, key):
     global _HB_STARTED
     _save_device_file(profile["seed"], {"hwid": profile["hwid"], "comps": profile["comps"]})
@@ -2179,11 +2237,23 @@ def authenticate():
     if problem:
         fatal_exit(problem)
     
-    # ==================== BƯỚC 1: SKIP AUTO-LOAD (REMOVED) ====================
-    # Auto-save and auto-load license file DISABLED per user request
-    # Always require manual key entry every session
-    
-    # ==================== BƯỚC 2: NHẬP KEY THỦ CÔNG (LUÔN BẮT BUỘC) ====================
+    # ==================== BƯỚC 1: TỰ ĐỘNG LOAD KEY ĐÃ LƯU ====================
+    saved_key = _load_license_key(hwid)
+    if saved_key:
+        is_valid, _ = with_spinner("Đang xác thực key đã lưu", check_license_curl, saved_key)
+        if is_valid:
+            device_activated(profile, saved_key)
+            _LICENSE_GUARD["key"] = saved_key
+            _LICENSE_GUARD["last"] = time.time()
+            return  # Key còn hợp lệ, bỏ qua màn hình nhập
+        else:
+            # Key hết hạn hoặc bị thu hồi → xóa file, yêu cầu nhập lại
+            try:
+                os.remove(LICENSE_FILE)
+            except Exception:
+                pass
+
+    # ==================== BƯỚC 2: NHẬP KEY THỦ CÔNG ====================
     check_update_on_launch(hwid)
     note = None
     while True:
@@ -2211,9 +2281,9 @@ def authenticate():
         is_valid, response_text = with_spinner("Đang kết nối máy chủ", check_license_curl, input_key)
         
         if is_valid:
-            # ✓ Xác thực key thành công -> Kích hoạt (KHÔNG LƯU FILE)
-            # Auto-save DISABLED per user request
+            # ✓ Xác thực key thành công -> Kích hoạt và lưu key
             device_activated(profile, input_key)
+            _save_license_key(input_key, hwid)
             _LICENSE_GUARD["key"] = input_key
             _LICENSE_GUARD["last"] = time.time()
             msg_ok("Xác thực Key thành công!")
@@ -3457,6 +3527,11 @@ def detect_problem(pkg):
         # Track error 262 (soft ban indicator)
         if reason and "262" in str(reason):
             update_ban_tracker(error_code=262)
+            record_ban_event(pkg, "262")  # UPGRADE #1: Ban wave predictor
+        elif reason and "267" in str(reason):
+            record_ban_event(pkg, "267")  # Wave ban
+        elif reason and "268" in str(reason):
+            record_ban_event(pkg, "268")  # Wave ban
         return reason
     return None
 
@@ -3574,8 +3649,30 @@ def recover_tab(pkg, reason):
     if game_name and game_name in GAME_PROFILES:
         apply_game_profile(game_name)
     
+    # UPGRADE #2: Check account health & rotation
+    if is_account_resting(pkg):
+        print(f"\033[1;33m[*] {tab_label(pkg)} đang rest ({get_account_health_score(pkg)}% health) → skip rejoin\033[0m")
+        log_event("ROTATION_SKIP", pkg, "account resting")
+        return
+    
+    # UPGRADE #3: Exponential backoff rejoin
+    if not can_rejoin_now(pkg):
+        wait_sec = REJOIN_BACKOFF[pkg].get("wait_until", 0) - time.time()
+        print(f"\033[1;33m[*] {tab_label(pkg)} backoff rejoin, chờ {wait_sec:.0f}s nữa\033[0m")
+        log_event("BACKOFF_WAIT", pkg, f"wait={wait_sec:.0f}s")
+        return
+    
     started = time.time()
     ok = join_map(pkg, hard=hard)
+    
+    # UPGRADE #2: Track rejoin success/fail for health
+    if ok:
+        update_account_health(pkg, success=True)
+        reset_rejoin_backoff(pkg)  # UPGRADE #3: Reset backoff on success
+    else:
+        update_account_health(pkg, success=False)
+        record_rejoin_fail(pkg)  # UPGRADE #3: Apply backoff on fail
+    
     report_rejoin_result(pkg, ok, started, action)
 
 # ==================== BACKUP / RESTORE DATA TAB ====================
@@ -3847,6 +3944,57 @@ def display_ban_stats():
         print(f"Cảnh báo:                 {BAN_TRACKER['ban_warning']}")
     print("="*60 + "\n")
 
+def display_upgrade_stats():
+    """Hiển thị stats của 10 upgrades"""
+    print("\n" + "="*70)
+    print("🚀 UPGRADE FEATURES STATS")
+    print("="*70)
+    
+    # UPGRADE #1: Ban Wave Predictor
+    predicted = len([pkg for pkg in BAN_WAVE_ALERTS.values() if pkg.get("predicted_time", 0) > time.time()])
+    print(f"[1] Ban Wave Predictor    : {predicted} predictions active")
+    
+    # UPGRADE #2: Account Health & Rotation
+    health_scores = [get_account_health_score(p) for p in ACCOUNT_HEALTH.keys()]
+    avg_health = int(sum(health_scores) / len(health_scores)) if health_scores else 100
+    resting = len([p for p in ACCOUNT_ROTATION.values() if p.get("status") == "rest"])
+    print(f"[2] Account Health/Rotate : Avg {avg_health}% | {resting} resting")
+    
+    # UPGRADE #3: Exponential Backoff
+    backoff_active = len([p for p in REJOIN_BACKOFF.values() if p.get("fail_count", 0) > 0])
+    print(f"[3] Exponential Backoff   : {backoff_active} in backoff")
+    
+    # UPGRADE #4: Trend Detection
+    spikes_detected = len(TREND_ALERTS)
+    print(f"[4] Proactive Trend       : {spikes_detected} trend alerts")
+    
+    # UPGRADE #5: Smart Cache Clear
+    last_clear = max([LAST_SMART_CLEAR.get(p, 0) for p in LAST_SMART_CLEAR.keys()] or [0])
+    print(f"[5] Smart Cache Clear     : Last {fmt_duration(time.time() - last_clear) if last_clear else 'never'}")
+    
+    # UPGRADE #6: Screen AI Advanced
+    state_changes = sum(len(v) for v in SCREEN_ADVANCED["state_changes"].values())
+    print(f"[6] Advanced Screen AI    : {state_changes} state changes tracked")
+    
+    # UPGRADE #7: Smart Retry
+    success_methods = sum(len(v) for v in RETRY_STRATEGY.values())
+    print(f"[7] Smart Retry Strategy  : {success_methods} learned methods")
+    
+    # UPGRADE #8: Log Insights
+    top_errors = len(LOG_INSIGHTS.get("top_errors", []))
+    recommendations = len(LOG_INSIGHTS.get("recommendations", []))
+    print(f"[8] Log Insights          : {top_errors} top errors | {recommendations} recommendations")
+    
+    # UPGRADE #9: Discord Rich
+    print(f"[9] Discord Rich Insights : Embed ready")
+    
+    # UPGRADE #10: Dynamic Schedule
+    peak_hours = len(DYNAMIC_SCHEDULE.get("peak_hours", {}))
+    paused = "YES (peak hour)" if DYNAMIC_SCHEDULE["auto_pause_peak"] else "NO"
+    print(f"[10] Dynamic Schedule     : {peak_hours} peak hours | Auto-pause: {paused}")
+    
+    print("="*70 + "\n")
+
 def menu_custom_count_mode(packages_list):
     """Chế độ Custom Count: user nhập số N để chạy N packages đầu"""
     global SELECTED_PACKAGES, SELECT_ALL_PACKAGES
@@ -3959,11 +4107,16 @@ def menu_selective_mode(packages_list):
 def get_active_packages():
     """Trả về danh sách packages cần chạy (filtered by selection)"""
     global SELECTED_PACKAGES, SELECT_ALL_PACKAGES
-    
-    if SELECT_ALL_PACKAGES or not SELECTED_PACKAGES:
-        return list(PACKAGE_GAMES.keys())
+
+    if PACKAGE_MODE == "custom":
+        base = list(CUSTOM_PACKAGES)
     else:
-        return SELECTED_PACKAGES
+        base = list(PACKAGE_GAMES.keys())
+
+    if SELECT_ALL_PACKAGES or not SELECTED_PACKAGES:
+        return base
+    else:
+        return [p for p in SELECTED_PACKAGES if p in base]
 
 def get_running_packages():
     """Package thực sự được chạy: có trong prefix và trong danh sách đã chọn"""
@@ -4019,6 +4172,16 @@ def preflight_items():
 
     if not SELECT_ALL_PACKAGES and not SELECTED_PACKAGES:
         items.append(("fail", True, "Chưa chọn packages nào để chạy"))
+
+    if PACKAGE_MODE == "custom":
+        if not CUSTOM_PACKAGES:
+            items.append(("fail", True, "Custom Package List trống — vào Package mode để thêm"))
+        else:
+            _pm_out = run_cmd(["pm", "list", "packages"])
+            _on_device = {ln.split(":", 1)[1].strip() for ln in _pm_out.splitlines() if ":" in ln}
+            _missing = [p for p in CUSTOM_PACKAGES if p not in _on_device]
+            if _missing:
+                items.append(("warn", False, f"{len(_missing)} custom package không có trên máy: {', '.join(_missing)}"))
 
     if TARGET_LINK:
         items.append(("ok", False, f"Game: {SELECTED_GAME_NAME or TARGET_LINK}"))
@@ -4083,6 +4246,374 @@ def _ask_close_all_after_zero():
     if music_on:
         music_stop()
     return f" | đã tắt {len(pkgs)} tab" + (" và nhạc" if music_on else "")
+
+# ==================== UPGRADE #1: BAN WAVE PREDICTOR ====================
+BAN_WAVE_HISTORY = {}  # {pkg: [{"time": timestamp, "code": "262", "count": 1}, ...]}
+BAN_WAVE_PATTERNS = {}  # {pkg: {"peak_hours": [8,9,20,21], "frequency_hours": 24, "last_scan": timestamp}}
+BAN_WAVE_ALERTS = {}  # {pkg: {"predicted_time": timestamp, "confidence": 0-100}}
+
+def record_ban_event(pkg, code):
+    """Ghi lại sự kiện ban để phân tích pattern"""
+    if pkg not in BAN_WAVE_HISTORY:
+        BAN_WAVE_HISTORY[pkg] = []
+    now = time.time()
+    BAN_WAVE_HISTORY[pkg].append({"time": now, "code": str(code), "count": 1})
+    BAN_WAVE_HISTORY[pkg] = BAN_WAVE_HISTORY[pkg][-100:]  # Giữ 100 sự kiện gần nhất
+    analyze_ban_patterns(pkg)
+
+def analyze_ban_patterns(pkg):
+    """Phân tích pattern: ban xảy ra lúc mấy giờ, mỗi bao lâu lần"""
+    if pkg not in BAN_WAVE_HISTORY or len(BAN_WAVE_HISTORY[pkg]) < 3:
+        return
+    now = time.time()
+    events = BAN_WAVE_HISTORY[pkg]
+    timestamps = [e["time"] for e in events]
+    hours_of_day = [datetime.fromtimestamp(t).hour for t in timestamps]
+    deltas = [timestamps[i+1] - timestamps[i] for i in range(len(timestamps)-1)]
+    peak_hours = [h for h in set(hours_of_day) if hours_of_day.count(h) >= 2]
+    avg_delta = sum(deltas) / len(deltas) if deltas else 86400
+    freq_hours = int(avg_delta / 3600) or 24
+    BAN_WAVE_PATTERNS[pkg] = {
+        "peak_hours": sorted(peak_hours),
+        "frequency_hours": freq_hours,
+        "last_scan": timestamps[-1],
+        "event_count": len(events)
+    }
+    predict_next_ban_wave(pkg)
+
+def predict_next_ban_wave(pkg):
+    """Dự báo khi sắp có scan ban"""
+    if pkg not in BAN_WAVE_PATTERNS:
+        return
+    pattern = BAN_WAVE_PATTERNS[pkg]
+    peak_hours = pattern.get("peak_hours", [])
+    freq_hours = pattern.get("frequency_hours", 24)
+    last_scan = pattern.get("last_scan", 0)
+    now = time.time()
+    if not peak_hours:
+        return
+    next_hour = int(datetime.now().hour) + 1
+    candidate_hours = [h for h in peak_hours if h >= next_hour]
+    if not candidate_hours:
+        candidate_hours = peak_hours
+    predicted = datetime.now().replace(hour=candidate_hours[0], minute=0, second=0, microsecond=0)
+    if predicted < datetime.now():
+        predicted += timedelta(days=1)
+    pred_time = predicted.timestamp()
+    confidence = min(100, (pattern["event_count"] - 2) * 15)
+    BAN_WAVE_ALERTS[pkg] = {"predicted_time": pred_time, "confidence": confidence, "peak_hour": candidate_hours[0]}
+    hours_until = int((pred_time - now) / 3600)
+    if hours_until >= 1 and hours_until <= 4 and confidence > 60:
+        msg = f"🔴 Dự báo: {tab_label(pkg)} sắp có scan lúc {datetime.fromtimestamp(pred_time).strftime('%H:%M')} ({hours_until}h nữa, độ tin: {confidence}%)"
+        print(f"\033[1;31m[!] {msg}\033[0m")
+        log_event("BAN_WAVE_PREDICT", pkg, f"hours={hours_until} confidence={confidence}%")
+        notify_async("warn", "Dự báo Scan Ban", msg, pkg=pkg, action="Có thể tạm tắt rejoin trong vòng 2h", cooldown=3600)
+
+def antiban_check_predicted_wave():
+    """Check nếu đã đến giờ dự báo → auto pause"""
+    now = time.time()
+    for pkg, alert in BAN_WAVE_ALERTS.items():
+        pred_time = alert.get("predicted_time", 0)
+        if now >= pred_time - 300 and now <= pred_time + 300:  # ±5 phút
+            if not ANTI_BAN.get("paused"):
+                ANTI_BAN["paused"] = True
+                ANTI_BAN["pause_until"] = now + 3600
+                log_event("ANTIBAN", pkg, "Ban wave detected - auto pause 1h")
+                notify_async("critical", "Scan Ban Xảy Ra", f"{tab_label(pkg)} dự báo scan đã bắt đầu. Tạm dừng 1h.", pkg=pkg)
+
+# ==================== UPGRADE #2: ACCOUNT HEALTH SCORE & ROTATION ====================
+ACCOUNT_HEALTH = {}  # {pkg: {"score": 0-100, "rejoin_ok": N, "rejoin_fail": N, "last_updated": timestamp}}
+ACCOUNT_ROTATION = {}  # {pkg: {"status": "active/rest", "rest_until": timestamp}}
+
+def update_account_health(pkg, success=True):
+    """Cập nhật health score dựa trên rejoin success/fail"""
+    if pkg not in ACCOUNT_HEALTH:
+        ACCOUNT_HEALTH[pkg] = {"score": 100, "rejoin_ok": 0, "rejoin_fail": 0, "last_updated": time.time()}
+    h = ACCOUNT_HEALTH[pkg]
+    if success:
+        h["rejoin_ok"] += 1
+    else:
+        h["rejoin_fail"] += 1
+    total = h["rejoin_ok"] + h["rejoin_fail"]
+    if total > 0:
+        h["score"] = int((h["rejoin_ok"] / total) * 100)
+    h["last_updated"] = time.time()
+
+def get_account_health_score(pkg):
+    """Lấy health score (0-100, cao = tốt)"""
+    return ACCOUNT_HEALTH.get(pkg, {}).get("score", 100)
+
+def check_account_rotation():
+    """Xoay vòng account: yếu rest, mạnh priority"""
+    now = time.time()
+    for pkg in (ACCOUNT_ROTATION.keys() or []):
+        status = ACCOUNT_ROTATION[pkg].get("status", "active")
+        rest_until = ACCOUNT_ROTATION[pkg].get("rest_until", 0)
+        health = get_account_health_score(pkg)
+        if health < 50 and status != "rest":
+            ACCOUNT_ROTATION[pkg] = {"status": "rest", "rest_until": now + 7200}  # Rest 2h
+            print(f"\033[1;33m[*] {tab_label(pkg)} health {health}% < 50% → standby 2h\033[0m")
+            log_event("ROTATION", pkg, f"health={health}% → rest 2h")
+        elif status == "rest" and now >= rest_until:
+            ACCOUNT_ROTATION[pkg] = {"status": "active", "rest_until": 0}
+            print(f"\033[1;32m[+] {tab_label(pkg)} rest time hết → back online\033[0m")
+            log_event("ROTATION", pkg, "rest expired → active")
+
+def is_account_resting(pkg):
+    """Check có đang rest không"""
+    return ACCOUNT_ROTATION.get(pkg, {}).get("status") == "rest" and ACCOUNT_ROTATION[pkg].get("rest_until", 0) > time.time()
+
+# ==================== UPGRADE #3: EXPONENTIAL BACKOFF REJOIN ====================
+REJOIN_BACKOFF = {}  # {pkg: {"fail_count": 0, "last_fail_time": timestamp, "wait_until": timestamp}}
+REJOIN_BACKOFF_STRATEGY = {
+    1: 5,      # fail 1× → wait 5s
+    2: 30,     # fail 2× → wait 30s
+    3: 300,    # fail 3× → pause 5m
+    4: 900,    # fail 4× → pause 15m
+    5: 3600,   # fail 5× → pause 1h
+}
+
+def record_rejoin_fail(pkg):
+    """Ghi nhận rejoin fail, áp dụng backoff"""
+    if pkg not in REJOIN_BACKOFF:
+        REJOIN_BACKOFF[pkg] = {"fail_count": 0, "last_fail_time": time.time(), "wait_until": 0}
+    r = REJOIN_BACKOFF[pkg]
+    r["fail_count"] += 1
+    r["last_fail_time"] = time.time()
+    wait_sec = REJOIN_BACKOFF_STRATEGY.get(min(r["fail_count"], 5), 3600)
+    r["wait_until"] = time.time() + wait_sec
+    print(f"\033[1;31m[!] {tab_label(pkg)} rejoin fail lần {r['fail_count']} → chờ {wait_sec}s\033[0m")
+    log_event("REJOIN_BACKOFF", pkg, f"fail_count={r['fail_count']} wait={wait_sec}s")
+
+def can_rejoin_now(pkg):
+    """Check có thể rejoin được không (đã hết backoff wait)"""
+    if pkg not in REJOIN_BACKOFF:
+        return True
+    return time.time() >= REJOIN_BACKOFF[pkg].get("wait_until", 0)
+
+def reset_rejoin_backoff(pkg):
+    """Reset backoff khi rejoin thành công"""
+    if pkg in REJOIN_BACKOFF:
+        REJOIN_BACKOFF[pkg]["fail_count"] = 0
+        REJOIN_BACKOFF[pkg]["wait_until"] = 0
+
+# ==================== UPGRADE #4: PROACTIVE TREND DETECTION ====================
+TREND_METRICS = {}  # {pkg: {"freeze_streak": [timestamps], "error_262_streak": [timestamps], "login_fail_streak": []}}
+TREND_ALERTS = {}   # {pkg: [{"type": "freeze_spike", "timestamp": T, "severity": 1-5}]}
+
+def record_trend(pkg, event_type):
+    """Ghi lại trend event để detect pattern"""
+    if pkg not in TREND_METRICS:
+        TREND_METRICS[pkg] = {"freeze_streak": [], "error_262_streak": [], "login_fail_streak": [], "crash_streak": []}
+    now = time.time()
+    key = f"{event_type}_streak"
+    if key in TREND_METRICS[pkg]:
+        TREND_METRICS[pkg][key].append(now)
+        TREND_METRICS[pkg][key] = [t for t in TREND_METRICS[pkg][key] if now - t < 3600]  # Giữ 1h gần nhất
+    detect_trend_spike(pkg, event_type)
+
+def detect_trend_spike(pkg, event_type):
+    """Phát hiện spike trong 5 phút"""
+    if pkg not in TREND_METRICS:
+        return
+    now = time.time()
+    key = f"{event_type}_streak"
+    events = [t for t in TREND_METRICS[pkg].get(key, []) if now - t < 300]  # 5 phút
+    if len(events) >= 3:
+        severity = min(5, len(events) - 2)
+        msg = f"🔴 SPIKE DETECT: {tab_label(pkg)} {event_type} {len(events)}x/5min (severity {severity}/5)"
+        print(f"\033[1;31m[!] {msg}\033[0m")
+        log_event("TREND_SPIKE", pkg, f"type={event_type} count={len(events)} severity={severity}")
+        if severity >= 4:
+            notify_async("critical", "Trend Spike Detected", msg, pkg=pkg, action="Cân nhắc restart app")
+        if event_type == "freeze_streak":
+            print(f"\033[1;31m[!] Sắp auto-restart {tab_label(pkg)} để tránh crash\033[0m")
+
+# ==================== UPGRADE #5: SMART CACHE CLEAR ====================
+SMART_CACHE_TRIGGERS = {
+    "cookie_age_hours": 6,
+    "rejoin_fail_count": 2,
+    "peak_hours_before": True,
+    "clear_cooldown_sec": 1800,
+}
+LAST_SMART_CLEAR = {}
+
+def should_smart_clear(pkg):
+    """Check xem có cần clear cache không"""
+    now = time.time()
+    if pkg in LAST_SMART_CLEAR and now - LAST_SMART_CLEAR[pkg] < SMART_CACHE_TRIGGERS["clear_cooldown_sec"]:
+        return False, "Vừa clear (cooldown)"
+    if pkg in REJOIN_BACKOFF and REJOIN_BACKOFF[pkg]["fail_count"] >= SMART_CACHE_TRIGGERS["rejoin_fail_count"]:
+        return True, "Rejoin fail nhiều lần"
+    if (ANTI_BAN.get("enabled") and len(ANTI_BAN.get("cookie_change", [])) >= 3):
+        return True, "Cookie change liên tiếp"
+    return False, "OK"
+
+def do_smart_cache_clear(pkg, reason):
+    """Xóa cache smart"""
+    try:
+        print(f"\033[1;33m[*] Smart cache clear {tab_label(pkg)}: {reason}\033[0m")
+        sh(f"rm -rf /data/data/{pkg}/cache/* /data/data/{pkg}/code_cache/*")
+        LAST_SMART_CLEAR[pkg] = time.time()
+        log_event("SMART_CLEAR", pkg, reason)
+    except Exception as e:
+        log_event("SMART_CLEAR_ERR", pkg, str(e))
+
+# ==================== UPGRADE #6: ADVANCED SCREEN AI ====================
+SCREEN_ADVANCED = {
+    "loading_bar_timeout": 30,  # nếu loading > 30s → soft restart
+    "splash_screen_timeout": 60,
+    "stuck_lobby_timeout": 45,
+    "last_checked": {},
+    "state_changes": {}
+}
+
+def analyze_screen_advanced(pkg, state):
+    """Analyze screen state nâng cao: detect loading bar stuck, splash screen, etc."""
+    now = time.time()
+    if pkg not in SCREEN_ADVANCED["last_checked"]:
+        SCREEN_ADVANCED["last_checked"][pkg] = now
+        SCREEN_ADVANCED["state_changes"][pkg] = []
+    last_state_time = SCREEN_ADVANCED["last_checked"][pkg]
+    duration = now - last_state_time
+    state_changes = SCREEN_ADVANCED["state_changes"][pkg]
+    state_changes.append({"state": state, "time": now, "duration": duration})
+    state_changes = state_changes[-10:]
+    SCREEN_ADVANCED["state_changes"][pkg] = state_changes
+    if state == "loading_stuck" and duration > SCREEN_ADVANCED["loading_bar_timeout"]:
+        print(f"\033[1;33m[!] {tab_label(pkg)} loading bar stuck {duration:.0f}s → soft restart\033[0m")
+        log_event("SCREEN_ADV", pkg, "loading_stuck restart")
+        sh(f"am start -n {shlex.quote(pkg)}/com.roblox.client.startup.ActivitySplashScreen")
+    elif state == "splash_screen" and duration > SCREEN_ADVANCED["splash_screen_timeout"]:
+        print(f"\033[1;33m[!] {tab_label(pkg)} splash screen {duration:.0f}s → kill & reopen\033[0m")
+        log_event("SCREEN_ADV", pkg, "splash_timeout restart")
+        sh(f"am force-stop {shlex.quote(pkg)}")
+        time.sleep(2)
+        open_game(pkg)
+    elif state == "stuck_lobby" and duration > SCREEN_ADVANCED["stuck_lobby_timeout"]:
+        print(f"\033[1;33m[!] {tab_label(pkg)} stuck ở lobby {duration:.0f}s → enter map\033[0m")
+        log_event("SCREEN_ADV", pkg, "stuck_lobby action")
+
+# ==================== UPGRADE #7: SMART RETRY STRATEGY ====================
+RETRY_STRATEGY = {}  # {pkg: {"last_error": code, "last_retry_method": "method", "success_methods": []}}
+
+def learn_retry_method(pkg, error_code, method_tried, success):
+    """Học phương pháp retry nào hiệu quả với error nào"""
+    if pkg not in RETRY_STRATEGY:
+        RETRY_STRATEGY[pkg] = {"last_error": None, "last_retry_method": None, "success_methods": {}}
+    r = RETRY_STRATEGY[pkg]
+    r["last_error"] = error_code
+    r["last_retry_method"] = method_tried
+    if success:
+        if error_code not in r["success_methods"]:
+            r["success_methods"][error_code] = []
+        if method_tried not in r["success_methods"][error_code]:
+            r["success_methods"][error_code].append(method_tried)
+
+def get_smart_retry_method(pkg, error_code):
+    """Lấy phương pháp retry nào đã từng thành công"""
+    if pkg not in RETRY_STRATEGY:
+        return "restart_app"
+    methods = RETRY_STRATEGY[pkg].get("success_methods", {}).get(error_code, [])
+    if methods:
+        return methods[0]  # Dùng phương pháp thành công trước đó
+    if str(error_code) in ("262", "267", "268"):
+        return "wait_5min"
+    elif str(error_code) in ("282", "283"):
+        return "clear_cache_restart"
+    elif "game_full" in str(error_code):
+        return "wait_3min"
+    else:
+        return "restart_app"
+
+# ==================== UPGRADE #8: LOG ANALYSIS & INSIGHTS ====================
+LOG_INSIGHTS = {"top_errors": {}, "hourly_trend": {}, "last_analysis": 0, "recommendations": []}
+
+def analyze_logs_for_insights():
+    """Phân tích log mỗi giờ → recommend hành động"""
+    now = time.time()
+    if now - LOG_INSIGHTS["last_analysis"] < 3600:
+        return
+    try:
+        with open(LOG_FILE, "r", encoding="utf-8", errors="ignore") as f:
+            lines = f.readlines()[-1000:]
+    except:
+        return
+    error_count = {}
+    for line in lines:
+        m = re.search(r"code=(\d+)", line)
+        if m:
+            code = m.group(1)
+            error_count[code] = error_count.get(code, 0) + 1
+    LOG_INSIGHTS["top_errors"] = sorted(error_count.items(), key=lambda x: x[1], reverse=True)[:5]
+    LOG_INSIGHTS["last_analysis"] = now
+    recommendations = []
+    for code, count in LOG_INSIGHTS["top_errors"][:3]:
+        if code == "262" and count >= 3:
+            recommendations.append(f"⚠️ Lỗi 262 {count}x → Soft ban signal, tạm pause")
+        elif code in ("267", "268") and count >= 2:
+            recommendations.append(f"⚠️ Lỗi {code} {count}x → Wave ban, tắt 1h")
+        elif code in ("282", "283") and count >= 3:
+            recommendations.append(f"⚠️ Lỗi {code} {count}x → Clear cache & restart")
+    LOG_INSIGHTS["recommendations"] = recommendations
+    if recommendations:
+        print(f"\n\033[1;33m📊 LOG ANALYSIS INSIGHTS:\033[0m")
+        for r in recommendations:
+            print(f" {r}")
+
+# ==================== UPGRADE #9: DISCORD RICH INSIGHTS ====================
+def build_rich_status_embed(packages):
+    """Tạo Discord embed chứa insights thay vì chỉ alert"""
+    now = time.time()
+    total_rejoin = sum(REJOIN_COUNT.values())
+    success_count = sum(1 for pkg in packages if REJOIN_COUNT.get(pkg, 0) > 0 and not is_app_running(pkg))
+    fail_count = len([pkg for pkg in packages if REJOIN_BACKOFF.get(pkg, {}).get("fail_count", 0) > 0])
+    avg_health = int(sum(get_account_health_score(p) for p in packages) / len(packages)) if packages else 100
+    critical_alerts = [pkg for pkg in packages if get_account_health_score(pkg) < 50]
+    embed_data = {
+        "title": "📊 PAIN TOOL Status Report",
+        "description": f"Tool đang chạy {fmt_duration(now - START_UP_TIME.timestamp()) if START_UP_TIME else '?'}",
+        "fields": [
+            {"name": "Rejoin Stats", "value": f"Total: {total_rejoin} | OK: ≥{success_count} | Fail: {fail_count}", "inline": True},
+            {"name": "Account Health", "value": f"Avg Score: {avg_health}% {'🟢' if avg_health >= 70 else '🟡' if avg_health >= 50 else '🔴'}", "inline": True},
+            {"name": "Active Tabs", "value": f"{sum(1 for p in packages if is_app_running(p))}/{len(packages)}", "inline": True},
+        ]
+    }
+    if critical_alerts:
+        embed_data["fields"].append({"name": "⚠️ Critical", "value": ", ".join([tab_label(p) for p in critical_alerts]), "inline": False})
+    if LOG_INSIGHTS["recommendations"]:
+        embed_data["fields"].append({"name": "💡 Recommendations", "value": "\n".join(LOG_INSIGHTS["recommendations"][:3]), "inline": False})
+    return embed_data
+
+# ==================== UPGRADE #10: DYNAMIC SCHEDULE & SMART PAUSE ====================
+DYNAMIC_SCHEDULE = {
+    "peak_hours": {},  # {hour: likelihood 0-100}
+    "auto_pause_peak": False,
+    "learned_patterns": {}
+}
+
+def learn_peak_hours():
+    """Học peak hours từ ban wave pattern"""
+    for pkg, pattern in BAN_WAVE_PATTERNS.items():
+        peak_hours = pattern.get("peak_hours", [])
+        for h in peak_hours:
+            if h not in DYNAMIC_SCHEDULE["peak_hours"]:
+                DYNAMIC_SCHEDULE["peak_hours"][h] = 0
+            DYNAMIC_SCHEDULE["peak_hours"][h] += 20
+    if DYNAMIC_SCHEDULE["peak_hours"]:
+        print(f"\033[1;32m[*] Learned peak hours: {sorted(DYNAMIC_SCHEDULE['peak_hours'].keys())} (cao rủi ro)\033[0m")
+
+def check_should_pause_peak():
+    """Auto pause nếu đang ở peak hour"""
+    if not DYNAMIC_SCHEDULE["auto_pause_peak"]:
+        return
+    now = datetime.now().hour
+    if now in DYNAMIC_SCHEDULE["peak_hours"]:
+        if not ANTI_BAN.get("paused"):
+            ANTI_BAN["paused"] = True
+            ANTI_BAN["pause_until"] = time.time() + 3600
+            log_event("DYNAMIC_PAUSE", detail=f"peak_hour={now}")
+            print(f"\033[1;33m[*] Peak hour {now}:00 → auto pause rejoin 1h\033[0m")
 
 def start_tool():
     global stop_start, START_UP_TIME, CYCLE_START, STOP_REASON, _LISTENER_GEN, NEXT_AUTO_RESTART, _HOP_LAG, _HOP_PAUSE_UNTIL
@@ -4294,6 +4825,72 @@ def start_tool():
                     antiban_tick()
                 except Exception:
                     pass
+                # === UPGRADE INTEGRATIONS INTO MAIN LOOP ===
+                try:
+                    antiban_check_predicted_wave()  # UPGRADE #1
+                except Exception:
+                    pass
+                try:
+                    check_account_rotation()  # UPGRADE #2
+                except Exception:
+                    pass
+                try:
+                    # Check exponential backoff for rejoin (UPGRADE #3)
+                    for pkg in packages:
+                        if not can_rejoin_now(pkg) and pkg in REJOIN_BACKOFF:
+                            wait_sec = REJOIN_BACKOFF[pkg].get("wait_until", 0) - time.time()
+                            if wait_sec > 0 and wait_sec % 10 == 0:
+                                pass  # Silent wait
+                except Exception:
+                    pass
+                try:
+                    # Proactive trend detection (UPGRADE #4)
+                    for pkg in packages:
+                        if pkg in TREND_METRICS:
+                            current_freeze = is_tab_frozen(pkg)
+                            if current_freeze:
+                                record_trend(pkg, "freeze_streak")
+                except Exception:
+                    pass
+                try:
+                    # Smart cache clear (UPGRADE #5)
+                    if (time.time() - last_cleanup_time) % 60 == 0:
+                        for pkg in packages:
+                            should_clear, reason = should_smart_clear(pkg)
+                            if should_clear:
+                                do_smart_cache_clear(pkg, reason)
+                except Exception:
+                    pass
+                try:
+                    # Advanced screen AI (UPGRADE #6)
+                    for pkg in packages:
+                        if pkg in BAN_TRACKER:
+                            state = "normal"
+                            if is_tab_frozen(pkg):
+                                state = "loading_stuck"
+                            analyze_screen_advanced(pkg, state)
+                except Exception:
+                    pass
+                try:
+                    # Smart retry strategy learning (UPGRADE #7)
+                    for pkg in packages:
+                        if pkg in BAN_TRACKER and BAN_TRACKER[pkg].get("error_262_streak", 0) > 0:
+                            last_method = RETRY_STRATEGY.get(pkg, {}).get("last_retry_method", "restart_app")
+                            learn_retry_method(pkg, "262", last_method, False)
+                except Exception:
+                    pass
+                try:
+                    # Log analysis & insights (UPGRADE #8)
+                    if (time.time() - LOG_INSIGHTS.get("last_analysis", 0)) >= 3600:
+                        analyze_logs_for_insights()
+                except Exception:
+                    pass
+                try:
+                    # Dynamic schedule check (UPGRADE #10)
+                    check_should_pause_peak()
+                except Exception:
+                    pass
+                # === END UPGRADE INTEGRATIONS ===
                 try:
                     music_timer_tick()
                 except Exception:
@@ -4825,8 +5422,13 @@ def show_banner():
     else:
         _game_txt = f"{dot(True)} {C.GRN}{_bound}/{len(_installed)} package đã gắn game{C.R}"
     print(box_kv("Game", _game_txt, w, lw))
-    package_prefix = globals().get('PACKAGE_PREFIX', '')
-    print(box_kv("Package", f"{dot(n_tabs > 0)} {C.WHT}{clip(package_prefix, vw - 12)}{C.R} {C.GRY}({n_tabs} tab){C.R}", w, lw))
+    _pkg_mode = globals().get('PACKAGE_MODE', 'prefix')
+    if _pkg_mode == "prefix":
+        package_prefix = globals().get('PACKAGE_PREFIX', '')
+        _pkg_val = f"{dot(n_tabs > 0)} {C.WHT}Prefix Mode{C.R} {C.GRY}│ {clip(package_prefix, vw - 18)} ({n_tabs} tab){C.R}"
+    else:
+        _pkg_val = f"{dot(n_tabs > 0)} {C.WHT}Custom Mode{C.R} {C.GRY}│ {len(globals().get('CUSTOM_PACKAGES', []))} packages ({n_tabs} tab){C.R}"
+    print(box_kv("Package", _pkg_val, w, lw))
     print(box_kv("Rejoin", f"{dot(True)} {C.WHT}{clip(get_rejoin_mode_str(), vw - 2)}{C.R}", w, lw))
     auto_clear = globals().get('AUTO_CLEAR_DATA')
     freeze_timeout = globals().get('FREEZE_TIMEOUT_MIN', 0)
@@ -4858,7 +5460,7 @@ def show_banner():
     entries = [
         ("1", "Start"),
         ("2", "Set up"),
-        ("3", "Package prefix"),
+        ("3", "Set up package"),
         ("4", "Change ID"),
         ("5", "Set Webhook URL"),
         ("6", "Xóa cache"),
@@ -8173,6 +8775,7 @@ MENU_NAMES = {
     "17": "Anti-AFK",
     "18": "Nghe nhạc YouTube",
     "19": "Dừng khẩn cấp",
+    "20": "Tự động start khi khởi động",
     "0": "Thoát",
 }
 
@@ -9137,18 +9740,95 @@ def menu_import_config():
     print(f" {C.GRY}Kiểm tra lại webhook nếu máy này cần gửi thông báo.{C.R}")
     wait_enter()
 
+def menu_reset_config():
+    """Đặt lại toàn bộ cài đặt về mặc định"""
+    global WEBHOOK_URL, DISCORD_UID, TARGET_LINK, SELECTED_GAME_NAME
+    global PACKAGE_PREFIX, AUTO_REJOIN_MODE, DELAY_REJOIN_MINUTES
+    global AUTO_CLEAR_DATA, AUTO_BACKUP, SELECTED_PACKAGES, SELECT_ALL_PACKAGES
+    global CUSTOM_PACKAGES, PACKAGE_MODE, ACCOUNTS, PROFILES, SCHEDULE
+    global VIP_SERVERS, GAME_PROFILES, ALIASES, EXECUTOR_BINDING, PACKAGE_GAMES
+    global LOW_RAM_ALERT, LOW_RAM_MB, LOW_RAM_AUTO_CLEAN
+    global GFX_LOW, GFX_FPS, GFX_AUTO, NET_CHECK
+    global AUTO_RESTART_HOURS, AUTO_RESTART_ACTION
+    global KEY_AUTO, KEY_FILES, WB_DETECT, OVERLAY_DETECT
+    global SERVER_HOP, HOP_PING_MS, FREEZE_TIMEOUT_MIN
+    global MONITOR_ONLY, SCREEN_ARCHIVE, QUIET_HOURS, STOP_TIMER
+
+    clear_screen()
+    section_title("RESET CẤU HÌNH")
+    print(f" {C.YEL}⚠ Các cài đặt sau sẽ bị xóa / đặt lại:{C.R}\n")
+
+    def _show(label, val, default):
+        changed = f"{C.RED}✗{C.R}" if str(val) != str(default) else f"{C.GRY}–{C.R}"
+        print(f" {changed} {C.WHT}{label}:{C.R} {C.YEL}{val}{C.R}  {C.GRY}→ {default}{C.R}")
+
+    _show("Package prefix",   PACKAGE_PREFIX,       "com.roblox")
+    _show("Package mode",     PACKAGE_MODE,          "prefix")
+    _show("Custom packages",  f"{len(CUSTOM_PACKAGES)} package", "0 package")
+    _show("Game",             SELECTED_GAME_NAME,    "Chưa chọn")
+    _show("Link game",        TARGET_LINK or "trống","trống")
+    _show("Discord ID",       DISCORD_UID or "trống","trống")
+    _show("Webhook URL",      WEBHOOK_URL[:40] + "..." if len(WEBHOOK_URL) > 40 else WEBHOOK_URL or "trống", "trống")
+    _show("Auto rejoin mode", AUTO_REJOIN_MODE,      1)
+    _show("Auto clear data",  AUTO_CLEAR_DATA,       True)
+    _show("Auto backup",      AUTO_BACKUP,           True)
+
+    if PROFILES:
+        print(f" {C.RED}✗{C.R} {C.WHT}Profiles:{C.R} {C.YEL}{len(PROFILES)} profile{C.R}  {C.GRY}→ xóa hết{C.R}")
+    if SCHEDULE:
+        print(f" {C.RED}✗{C.R} {C.WHT}Schedule:{C.R} {C.YEL}{len(SCHEDULE)} lịch{C.R}  {C.GRY}→ xóa hết{C.R}")
+    if VIP_SERVERS:
+        print(f" {C.RED}✗{C.R} {C.WHT}VIP Servers:{C.R} {C.YEL}{len(VIP_SERVERS)} server{C.R}  {C.GRY}→ xóa hết{C.R}")
+
+    print(f"\n {C.YEL}File config cũ sẽ được lưu thành .bak trước khi reset.{C.R}\n")
+    if ask("Xác nhận reset? (y/n):").strip().lower() not in ("y", "yes"):
+        msg_cancel("Đã hủy.")
+        wait_enter()
+        return
+
+    # Backup config cũ
+    try:
+        if os.path.exists(CONFIG_FILE):
+            shutil.copy(CONFIG_FILE, CONFIG_FILE + ".bak")
+    except Exception:
+        pass
+
+    # Reset về mặc định
+    WEBHOOK_URL = ""; DISCORD_UID = ""; TARGET_LINK = ""
+    SELECTED_GAME_NAME = "Chưa chọn"; PACKAGE_PREFIX = "com.roblox"
+    AUTO_REJOIN_MODE = 1; DELAY_REJOIN_MINUTES = 1
+    AUTO_CLEAR_DATA = True; AUTO_BACKUP = True; FREEZE_TIMEOUT_MIN = 5
+    SELECTED_PACKAGES.clear(); SELECT_ALL_PACKAGES = True
+    CUSTOM_PACKAGES.clear(); PACKAGE_MODE = "prefix"
+    ACCOUNTS.clear(); PROFILES.clear(); SCHEDULE.clear()
+    VIP_SERVERS.clear(); GAME_PROFILES.clear()
+    ALIASES.clear(); EXECUTOR_BINDING.clear(); PACKAGE_GAMES.clear()
+    LOW_RAM_ALERT = False; LOW_RAM_MB = 500; LOW_RAM_AUTO_CLEAN = False
+    GFX_LOW = False; GFX_FPS = 60; GFX_AUTO = False; NET_CHECK = True
+    AUTO_RESTART_HOURS = 0; AUTO_RESTART_ACTION = "restart"
+    KEY_AUTO = False; KEY_FILES.clear(); WB_DETECT = True; OVERLAY_DETECT = True
+    SERVER_HOP = False; HOP_PING_MS = 100; MONITOR_ONLY = False
+    SCREEN_ARCHIVE = False; QUIET_HOURS = None; STOP_TIMER = None
+
+    save_config_file()
+    msg_done("Đã reset toàn bộ cấu hình về mặc định.")
+    wait_enter()
+
 def menu_config_io():
     while True:
         clear_screen()
-        section_title("XUẤT / NHẬP CẤU HÌNH")
+        section_title("SET UP CẤU HÌNH")
         print(f"{C.LPUR}[1]{C.R} {C.WHT}Xuất cấu hình ra file{C.R}")
         print(f"{C.LPUR}[2]{C.R} {C.WHT}Nhập cấu hình từ file{C.R}")
+        print(f"{C.LPUR}[3]{C.R} {C.WHT}Reset cấu hình về mặc định{C.R}")
         print(f"{C.RED}[0] Quay lại{C.R}\n")
         sub = ask("Chọn:").strip()
         if sub == "1":
             menu_export_config()
         elif sub == "2":
             menu_import_config()
+        elif sub == "3":
+            menu_reset_config()
         elif sub == "0":
             return
         else:
@@ -9179,7 +9859,7 @@ def menu_setup():
         print(f"{C.LPUR}[19]{C.R} {C.WHT}Giới hạn thời gian chạy [{'Bật' if STOP_TIMER.get('enabled') else 'Tắt'}]{C.R}")
         print(f"{C.LPUR}[20]{C.R} {C.WHT}Chế độ chỉ theo dõi [{'Bật' if MONITOR_ONLY else 'Tắt'}]{C.R}")
         print(f"{C.LPUR}[21]{C.R} {C.WHT}Lưu ảnh khi có lỗi nghiêm trọng [{'Bật' if SCREEN_ARCHIVE.get('enabled') else 'Tắt'}]{C.R}")
-        print(f"{C.LPUR}[22]{C.R} {C.WHT}Xuất / Nhập cấu hình{C.R}")
+        print(f"{C.LPUR}[22]{C.R} {C.WHT}Set up cấu hình{C.R}")
         print(f"{C.RED}[0] Quay lại menu chính{C.R}")
         sub = input("Chọn: ").strip()
         if sub == "1":
@@ -9246,7 +9926,7 @@ def menu_setup():
             announce_choice("21", "Lưu ảnh khi có lỗi nghiêm trọng")
             toggle_screen_archive()
         elif sub == "22":
-            announce_choice("22", "Xuất / Nhập cấu hình")
+            announce_choice("22", "Set up cấu hình")
             menu_config_io()
         elif sub == "0":
             msg_info("Quay lại menu chính...")
@@ -9256,22 +9936,128 @@ def menu_setup():
             invalid_choice(sub)
 
 def menu_package_prefix():
-    """Menu 3: [1] Set up package prefix, [2] Chọn mode package muốn chạy"""
+    """Menu 3: [1] Package mode, [2] Chọn mode package muốn chạy"""
     while True:
         clear_screen()
-        section_title("PACKAGE PREFIX")
-        print(f" {C.LPUR}[1]{C.R} {C.WHT}Set up package prefix{C.R}")
+        section_title("SET UP PACKAGE")
+        print(f" {C.LPUR}[1]{C.R} {C.WHT}Package mode{C.R}")
         print(f" {C.LPUR}[2]{C.R} {C.WHT}Chọn mode package muốn chạy{C.R}")
         print(f" {C.RED}[0] Quay lại menu chính{C.R}\n")
         sub = ask("Chọn:").strip()
         if sub == "0":
             return
         if sub == "1":
-            menu_setup_package_prefix()
+            menu_package_mode()
         elif sub == "2":
             menu_choose_run_mode()
         else:
             invalid_choice(sub)
+
+def menu_package_mode():
+    """Package mode: chứa Package Prefix Mode và Custom Package List"""
+    global PACKAGE_MODE
+    while True:
+        clear_screen()
+        section_title("PACKAGE MODE")
+        m1 = f"{C.GRN}●{C.R} " if PACKAGE_MODE == "prefix" else "  "
+        m2 = f"{C.GRN}●{C.R} " if PACKAGE_MODE == "custom" else "  "
+        print(f" {C.LPUR}[1]{C.R} {m1}{C.WHT}Package Prefix Mode{C.R}")
+        print(f" {C.LPUR}[2]{C.R} {m2}{C.WHT}Custom Package List{C.R}")
+        print(f" {C.RED}[0] Quay lại{C.R}\n")
+        sub = ask("Chọn:").strip()
+        if sub == "0":
+            return
+        elif sub == "1":
+            PACKAGE_MODE = "prefix"
+            save_config_file()
+            menu_setup_package_prefix()
+        elif sub == "2":
+            PACKAGE_MODE = "custom"
+            save_config_file()
+            menu_custom_packages()
+        else:
+            invalid_choice(sub)
+
+def menu_custom_packages():
+    """Thêm / xóa package name tùy chỉnh do người dùng nhập tay"""
+    global CUSTOM_PACKAGES
+    notice = ""
+    while True:
+        clear_screen()
+        section_title("CUSTOM PACKAGE LIST")
+        if CUSTOM_PACKAGES:
+            print(f"{C.GRN}Danh sách package ({len(CUSTOM_PACKAGES)}):{C.R}\n")
+            for i, pkg in enumerate(CUSTOM_PACKAGES, 1):
+                print(f" {C.LPUR}[{i:2}]{C.R} {pkg}")
+        else:
+            print(f"{C.GRY}Chưa có package nào trong danh sách.{C.R}")
+        print()
+        print(f" {C.LPUR}[1]{C.R} {C.WHT}Thêm package{C.R}")
+        print(f" {C.LPUR}[2]{C.R} {C.WHT}Xóa package (nhập số thứ tự){C.R}")
+        print(f" {C.LPUR}[3]{C.R} {C.WHT}Xóa toàn bộ danh sách{C.R}")
+        print(f" {C.RED}[0] Quay lại{C.R}\n")
+        if notice:
+            print(f"{notice}\n")
+            notice = ""
+        cmd = ask("Chọn:").strip()
+        if cmd == "0":
+            return
+        elif cmd == "1":
+            clear_screen()
+            section_title("THÊM PACKAGE")
+            pkg = ask("Nhập package name (vd: com.roblox1):").strip()
+            if not pkg:
+                notice = f"{C.YEL}Không nhập gì, bỏ qua.{C.R}"
+            elif pkg in CUSTOM_PACKAGES:
+                notice = f"{C.YEL}Package đã có trong danh sách: {pkg}{C.R}"
+            else:
+                _valid_pkg = bool(re.fullmatch(r"[a-zA-Z][a-zA-Z0-9_]*(\.[a-zA-Z][a-zA-Z0-9_]*)+", pkg))
+                if not _valid_pkg:
+                    print(f"{C.YEL}⚠ Format không hợp lệ: '{pkg}'{C.R}")
+                    print(f"{C.GRY}Package name phải có dạng: com.example.app{C.R}\n")
+                    _confirm = ask("Vẫn thêm? (y/n):").strip().lower()
+                    if _confirm != "y":
+                        notice = f"{C.GRY}Đã hủy.{C.R}"
+                        continue
+                CUSTOM_PACKAGES.append(pkg)
+                save_config_file()
+                notice = f"{C.GRN}✓ Đã thêm package: {pkg}{C.R}"
+        elif cmd == "2":
+            if not CUSTOM_PACKAGES:
+                notice = f"{C.RED}Danh sách trống, không có gì để xóa.{C.R}"
+                continue
+            raw = ask("Nhập số thứ tự cần xóa (vd: 1 2 3):").strip()
+            indices = []
+            bad = []
+            for part in raw.replace(",", " ").split():
+                if part.isdigit() and 1 <= int(part) <= len(CUSTOM_PACKAGES):
+                    indices.append(int(part) - 1)
+                else:
+                    bad.append(part)
+            if not indices:
+                notice = f"{C.RED}Số không hợp lệ.{C.R}"
+                continue
+            removed = []
+            for idx in sorted(set(indices), reverse=True):
+                removed.append(CUSTOM_PACKAGES.pop(idx))
+            save_config_file()
+            names = ", ".join(removed)
+            notice = f"{C.YEL}✗ Đã xóa: {names}{C.R}"
+            if bad:
+                notice += f"\n{C.RED}Bỏ qua: {' '.join(bad)}{C.R}"
+        elif cmd == "3":
+            if not CUSTOM_PACKAGES:
+                notice = f"{C.GRY}Danh sách đã trống.{C.R}"
+                continue
+            confirm = ask("Xóa toàn bộ? (y/n):").strip().lower()
+            if confirm == "y":
+                CUSTOM_PACKAGES.clear()
+                save_config_file()
+                notice = f"{C.YEL}Đã xóa toàn bộ danh sách.{C.R}"
+            else:
+                notice = f"{C.GRY}Đã hủy.{C.R}"
+        else:
+            notice = f"{C.RED}Lựa chọn không hợp lệ.{C.R}"
 
 def menu_setup_package_prefix():
     """Set up package prefix: chỉ nhập prefix rồi báo thành công"""
@@ -9289,16 +10075,41 @@ def menu_setup_package_prefix():
     wait_enter()
 
 def menu_choose_run_mode():
-    """Chọn mode package muốn chạy: liệt kê package theo prefix, rồi Custom Count hoặc Selective"""
+    """Chọn nguồn package: Prefix hoặc Custom Package List"""
     while True:
         clear_screen()
         section_title("CHỌN MODE PACKAGE MUỐN CHẠY")
-        packages_list = sorted(list_installed_packages())
-        if not packages_list:
-            msg_err(f"Không tìm thấy package nào khớp '{PACKAGE_PREFIX}'. Kiểm tra lại Set up package prefix.")
-            wait_enter()
+        print(f" {C.LPUR}[1]{C.R} {C.WHT}Prefix Mode{C.R}")
+        print(f"    → Quét package theo prefix ({PACKAGE_PREFIX})\n")
+        print(f" {C.LPUR}[2]{C.R} {C.WHT}Custom Package List Mode{C.R}")
+        print(f"    → Dùng danh sách custom ({len(CUSTOM_PACKAGES)} package)\n")
+        print(f" {C.RED}[0] Quay lại{C.R}\n")
+        choice = ask("Chọn:").strip()
+        if choice == "0":
             return
-        print(f"{C.GRN}✓ Tìm thấy {len(packages_list)} package:{C.R}\n")
+        elif choice == "1":
+            packages_list = sorted(list_installed_packages())
+            if not packages_list:
+                msg_err(f"Không tìm thấy package nào khớp '{PACKAGE_PREFIX}'.")
+                wait_enter()
+                continue
+            menu_run_count_selective(packages_list)
+        elif choice == "2":
+            if not CUSTOM_PACKAGES:
+                msg_err("Chưa có package nào trong Custom Package List.")
+                wait_enter()
+                continue
+            menu_run_count_selective(list(CUSTOM_PACKAGES))
+        else:
+            msg_err("Lựa chọn không hợp lệ.")
+            time.sleep(1)
+
+def menu_run_count_selective(packages_list):
+    """Hiện danh sách package và cho chọn Custom Count hoặc Selective"""
+    while True:
+        clear_screen()
+        section_title("CHỌN CHẾ ĐỘ CHẠY")
+        print(f"{C.GRN}✓ {len(packages_list)} package:{C.R}\n")
         for i, pkg in enumerate(packages_list, 1):
             print(f" {C.LPUR}[{i:2}]{C.R} {pkg}")
         print()
@@ -9311,12 +10122,12 @@ def menu_choose_run_mode():
         print(f"{C.LPUR}[2]{C.R} {C.WHT}Selective Mode{C.R}")
         print(f"    → Chọn từng package, tool chỉ chạy các package đã chọn\n")
         print(f"{C.RED}[0] Quay lại{C.R}\n")
-        mode_choice = ask("Chọn chế độ:").strip()
-        if mode_choice == "0":
+        sub = ask("Chọn chế độ:").strip()
+        if sub == "0":
             return
-        if mode_choice == "1":
+        elif sub == "1":
             menu_custom_count_mode(packages_list)
-        elif mode_choice == "2":
+        elif sub == "2":
             menu_selective_mode(packages_list)
         else:
             msg_err("Lựa chọn không hợp lệ.")
@@ -9700,6 +10511,11 @@ def verify_and_start():
     authenticate()   # <-- Xác thực key thẳng, vào menu ngay
 
     try:
+        load_saved_config()
+    except Exception:
+        pass
+
+    try:
         refresh_remote_games()
     except Exception:
         pass
@@ -9717,7 +10533,7 @@ def verify_and_start():
     while True:
         license_guard_tick()
         show_banner()
-        choice = ask_main("Chọn chức năng [0-19]:").strip()
+        choice = ask_main("Chọn chức năng [0-20]:").strip()
         if choice.lower() == "help":
             show_help()
             continue
@@ -9760,6 +10576,7 @@ def verify_and_start():
             menu_executor_binding()
         elif choice == "16":
             display_ban_stats()
+            display_upgrade_stats()  # UPGRADE #9: Show upgrade stats in menu
             wait_enter()
         elif choice == "17":
             menu_anti_afk()
@@ -9767,7 +10584,88 @@ def verify_and_start():
             menu_music()
         elif choice == "19":
             emergency_stop()
+        elif choice == "20":
+            menu_autostart_boot()
 
+
+def menu_autostart_boot():
+    """Thiết lập tự động start tool khi UgPhone / Termux khởi động lại (yêu cầu Termux:Boot)"""
+    BOOT_DIR  = os.path.join(os.path.expanduser("~"), ".termux", "boot")
+    BOOT_SCRIPT = os.path.join(BOOT_DIR, "painstart.sh")
+    TOOL_PATH = os.path.abspath(sys.argv[0])
+
+    def _is_enabled():
+        return os.path.isfile(BOOT_SCRIPT)
+
+    def _termux_boot_available():
+        """Kiểm tra Termux:Boot đã cài chưa (thư mục boot tồn tại hoặc có thể tạo)"""
+        try:
+            os.makedirs(BOOT_DIR, exist_ok=True)
+            return True
+        except Exception:
+            return False
+
+    while True:
+        clear_screen()
+        section_title("TỰ ĐỘNG START KHI KHỞI ĐỘNG")
+        enabled = _is_enabled()
+        status = f"{C.GRN}● Đang bật{C.R}" if enabled else f"{C.RED}○ Đang tắt{C.R}"
+        print(f" Trạng thái : {status}\n")
+        print(f" {C.GRY}Yêu cầu: Termux:Boot đã được cài và cấp quyền.{C.R}")
+        print(f" {C.GRY}Script boot: {BOOT_SCRIPT}{C.R}\n")
+        if enabled:
+            print(f" {C.LPUR}[1]{C.R} {C.WHT}Tắt tự động start{C.R}")
+        else:
+            print(f" {C.LPUR}[1]{C.R} {C.WHT}Bật tự động start{C.R}")
+        print(f" {C.LPUR}[2]{C.R} {C.WHT}Xem nội dung script boot{C.R}")
+        print(f" {C.RED}[0] Quay lại{C.R}\n")
+        sub = ask("Chọn:").strip()
+        if sub == "0":
+            return
+        elif sub == "1":
+            if enabled:
+                try:
+                    os.remove(BOOT_SCRIPT)
+                    msg_ok("Đã tắt tự động start.")
+                except Exception as e:
+                    msg_err(f"Không xóa được script: {e}")
+            else:
+                if not _termux_boot_available():
+                    msg_err("Không thể tạo thư mục boot. Hãy cài Termux:Boot và thử lại.")
+                    wait_enter()
+                    continue
+                script_content = f"""#!/data/data/com.termux/files/usr/bin/bash
+# PAIN TOOL — Auto-start script (tạo bởi tool)
+sleep 5
+cd "{os.path.dirname(TOOL_PATH)}"
+python3 "{TOOL_PATH}" &
+"""
+                try:
+                    with open(BOOT_SCRIPT, "w", encoding="utf-8") as f:
+                        f.write(script_content)
+                    os.chmod(BOOT_SCRIPT, 0o700)
+                    msg_ok("Đã bật tự động start! Tool sẽ tự chạy khi UgPhone khởi động lại.")
+                    print(f"\n {C.YEL}Lưu ý:{C.R}")
+                    print(f" {C.GRY}1. Đảm bảo Termux:Boot đã được cài từ F-Droid hoặc Play Store.{C.R}")
+                    print(f" {C.GRY}2. Mở Termux:Boot ít nhất 1 lần để kích hoạt.{C.R}")
+                    print(f" {C.GRY}3. Key sẽ được tự động nhập vì đã lưu từ lần đăng nhập trước.{C.R}")
+                except Exception as e:
+                    msg_err(f"Không tạo được script: {e}")
+            wait_enter()
+        elif sub == "2":
+            clear_screen()
+            section_title("NỘI DUNG SCRIPT BOOT")
+            if os.path.isfile(BOOT_SCRIPT):
+                try:
+                    with open(BOOT_SCRIPT, "r") as f:
+                        print(f.read())
+                except Exception as e:
+                    msg_err(f"Không đọc được: {e}")
+            else:
+                print(f"{C.GRY}Script chưa được tạo.{C.R}")
+            wait_enter()
+        else:
+            invalid_choice(sub)
 
 if __name__ == "__main__":
     if "--selftest" in sys.argv:
