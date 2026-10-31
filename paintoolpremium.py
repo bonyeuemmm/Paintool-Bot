@@ -36,7 +36,7 @@ except ImportError:
                     key, val = line.split('=', 1)
                     os.environ[key.strip()] = val.strip().strip('"').strip("'")
 
-VERSION = "v3.3.7"
+VERSION = "v3.4.5"
 
 # ==================== GLOBAL CONSTANTS (SERVER_URL / SECRET_KEY) ====================
 SERVER_URL = "https://pain-tool-rejoin-bot.apps.bot-hosting.cloud/api/verify"
@@ -488,6 +488,7 @@ _LOW_RAM_LAST = 0
 UPDATE_URL = "https://pain-tool-rejoin-bot.apps.bot-hosting.cloud/api/version"
 UPDATE_INFO = {"latest": None, "status": None, "checked_at": 0.0}
 UPDATE_CACHE_SEC = 600  # kết quả "mới nhất"/"có bản mới" được dùng lại trong 10 phút
+UPDATE_RETRY_SEC = 120  # lỗi mạng: tự thử kiểm tra lại sau 2 phút
 
 # ---- Profile & hẹn giờ ----
 PROFILES = {}
@@ -605,18 +606,26 @@ def update_status_line():
         return f"{C.YEL}Đang kiểm tra phiên bản...{C.R}"
     if st == "new":
         return (f"{C.YEL}Có bản mới {UPDATE_INFO.get('latest')} (đang dùng {VERSION}).{C.R}\n"
-                f" {C.GRY}Gõ {C.WHT}update{C.GRY} ở ô nhập key để cập nhật ngay.{C.R}")
+                f" {C.GRY}Hãy tải bản mới nhất để dùng tool tốt nhất.{C.R}")
     if st == "latest":
         return f"{C.GRN}Bạn đang dùng bản mới nhất ({VERSION}).{C.R}"
     if st == "fail":
-        return f"{C.GRY}Chưa kiểm tra được phiên bản (sẽ thử lại khi bạn nhập key).{C.R}"
+        return f"{C.GRY}Chưa kiểm tra được phiên bản (tool sẽ tự thử lại).{C.R}"
     return ""
+
+def update_hint_line():
+    """Gợi ý cập nhật cho màn hình chính / nhập key / log. Trả về "" khi không có bản mới."""
+    if not update_available():
+        return ""
+    return f"{C.YEL}▲ Có bản mới {UPDATE_INFO.get('latest')} — hãy cập nhật để dùng tool tốt nhất.{C.R}"
 
 def refresh_update_info(force=False):
     """Kiểm tra phiên bản trên server. Dùng cache khi còn mới, luôn thử lại khi lần trước lỗi mạng."""
     st = UPDATE_INFO.get("status")
     age = time.time() - UPDATE_INFO.get("checked_at", 0.0)
     if not force and st in ("new", "latest") and age < UPDATE_CACHE_SEC:
+        return
+    if not force and st == "fail" and age < UPDATE_RETRY_SEC:
         return
     UPDATE_INFO["status"] = "checking"
     try:
@@ -1206,7 +1215,7 @@ def load_saved_config():
     if not isinstance(data, dict):
         return
     WEBHOOK_URL = data.get("webhook_url", "")
-    DISCORD_UID = data.get("discord_uid", "")
+    DISCORD_UID = parse_discord_uid(data.get("discord_uid", "")) or ""
     AUTO_CLEAR_DATA = bool(data.get("auto_clear_data", AUTO_CLEAR_DATA))
     AUTO_BACKUP = bool(data.get("auto_backup", AUTO_BACKUP))
     QUIET_HOURS.update(data.get("quiet_hours", {}))
@@ -1284,6 +1293,13 @@ def load_saved_config():
         SCHEDULE["start"] = sch.get("start") if _valid_hhmm(sch.get("start")) else ""
         SCHEDULE["stop"] = sch.get("stop") if _valid_hhmm(sch.get("stop")) else ""
     NET_CHECK = bool(data.get("net_check", NET_CHECK))
+    _ui = data.get("update_info")
+    if (isinstance(_ui, dict) and isinstance(_ui.get("latest"), str)
+            and isinstance(_ui.get("checked_at"), (int, float))
+            and _ui["checked_at"] > UPDATE_INFO.get("checked_at", 0.0)):
+        UPDATE_INFO["latest"] = _ui["latest"]
+        UPDATE_INFO["checked_at"] = float(_ui["checked_at"])
+        UPDATE_INFO["status"] = "new" if update_available() else "latest"
     GFX_LOW = bool(data.get("gfx_low", GFX_LOW))
     GFX_AUTO = bool(data.get("gfx_auto", GFX_AUTO))
     fps = data.get("gfx_fps")
@@ -1392,6 +1408,7 @@ def _build_config_dict():
             "profiles": PROFILES,
             "schedule": SCHEDULE,
             "net_check": NET_CHECK,
+            "update_info": {"latest": UPDATE_INFO.get("latest"), "checked_at": UPDATE_INFO.get("checked_at", 0.0)},
             "aliases": ALIASES,
             "gfx_low": GFX_LOW,
             "gfx_fps": GFX_FPS,
@@ -2268,16 +2285,6 @@ def authenticate():
         if not input_key:
             continue
 
-        if input_key.lower() == "update":
-            latest = UPDATE_INFO.get("latest")
-            if UPDATE_INFO.get("status") != "new" or not latest:
-                note = f"{C.GRY}[i] Chưa có bản mới để cập nhật.{C.R}"
-                continue
-            ok, reason = perform_tool_update(latest)
-            if not ok:
-                note = f"{C.RED}[!] Cập nhật thất bại: {reason}.{C.R}"
-            continue
-        
         is_valid, response_text = with_spinner("Đang kết nối máy chủ", check_license_curl, input_key)
         
         if is_valid:
@@ -2987,6 +2994,15 @@ def send_detailed_alert(level, title, description, pkg=None, reason=None, action
     except Exception as e:
         log_event("ALERT_ERR", pkg=pkg, detail=f"Gửi alert lỗi: {e}")
 
+def parse_discord_uid(raw):
+    """Chuẩn hóa Discord ID: nhận 123..., <@123...>, <@!123...>, @123... Trả về chuỗi số hoặc None."""
+    s = (raw or "").strip()
+    m_ = re.fullmatch(r"<@!?(\d+)>", s) or re.fullmatch(r"@?(\d+)", s)
+    if not m_:
+        return None
+    uid = m_.group(1)
+    return uid if 17 <= len(uid) <= 20 else None
+
 def handle_send_text():
     if not WEBHOOK_URL:
         clear_screen()
@@ -3005,7 +3021,12 @@ def handle_send_text():
             time.sleep(1)
             return
 
-        discord_id = input("Nhập UID tài khoản Discord (Để trống để bỏ qua): ").strip()
+        _uid_raw = input("Nhập UID tài khoản Discord (Enter = ping @everyone): ").strip()
+        discord_id = ""
+        if _uid_raw:
+            discord_id = parse_discord_uid(_uid_raw) or ""
+            if not discord_id:
+                msg_warn("UID không hợp lệ (cần 17–20 chữ số, hoặc dạng <@id>). Sẽ ping @everyone.")
         now = datetime.now()
         footer_text = "MADE BY PAIN"
 
@@ -3027,8 +3048,7 @@ def handle_send_text():
             "avatar_url": "https://i.postimg.cc/gJbhCmHL/Pain-Gamer.png",
             "embeds": [{"description": description_text, "footer": {"text": footer_text}, "color": 65280}]
         }
-        if discord_id:
-            embed_data["content"] = f"<@{discord_id}>"
+        embed_data["content"] = "@everyone" + (f" <@{discord_id}>" if discord_id else "")
 
         msg_info("Đang gửi nội dung lên Discord...")
         try:
@@ -3086,7 +3106,7 @@ def build_status_embed(packages):
             "inline": True
         })
 
-        net_status = "🟢 Online" if is_online() else "🔴 Offline"
+        net_status = "?? Online" if is_online() else "🔴 Offline"
         fields.append({
             "name": "🌐 Mạng",
             "value": net_status,
@@ -3136,6 +3156,90 @@ def build_status_embed(packages):
     except Exception as e:
         log_event("EMBED_ERR", detail=f"build_status_embed lỗi: {e}")
         return None
+
+_PERIODIC_RUN = {"id": 0, "active": False}
+PERIODIC_REPORT_SEC = 300
+
+def _capture_periodic_shot():
+    """Chụp ảnh màn hình cho báo cáo định kỳ. Trả về đường dẫn file hoặc None."""
+    path = "/sdcard/pain_periodic.png"
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+    run_cmd(["screencap", "-p", path], timeout=15)
+    if not (os.path.exists(path) and os.path.getsize(path) > 0):
+        if run_cmd(["su", "-c", "id"], timeout=8).find("uid=0") != -1:
+            run_cmd(["su", "-c", f"screencap -p {path}"], timeout=15)
+    return path if (os.path.exists(path) and os.path.getsize(path) > 0) else None
+
+def send_periodic_report_with_shot(packages):
+    """Gửi báo cáo 5 phút kèm ảnh chụp (im lặng, không ping). Ném lỗi nếu Discord không nhận."""
+    if not webhook_active():
+        return
+    embed_obj = build_status_embed(packages)
+    if not embed_obj:
+        raise RuntimeError("không tạo được nội dung báo cáo")
+    shot = _capture_periodic_shot()
+    if shot:
+        embed_obj["image"] = {"url": "attachment://screenshot.png"}
+    payload = {
+        "username": "PAIN TOOL REJOIN VIP",
+        "avatar_url": "https://i.postimg.cc/gJbhCmHL/Pain-Gamer.png",
+        "embeds": [embed_obj],
+        "content": "",
+    }
+    tmp_json = os.path.join(os.path.expanduser("~"), ".pain_periodic_payload.json")
+    try:
+        with open(tmp_json, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False)
+        if shot:
+            args = ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", "-X", "POST", WEBHOOK_URL,
+                    "-F", f"payload_json=@{tmp_json};type=application/json",
+                    "-F", f"files[0]=@{shot};filename=screenshot.png"]
+        else:
+            args = ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", "-X", "POST", WEBHOOK_URL,
+                    "-H", "Content-Type: application/json", "--data-binary", f"@{tmp_json}"]
+        code_str = run_cmd(args, timeout=40).strip()
+    finally:
+        for p in (tmp_json, shot):
+            if p:
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+    code = int(code_str) if code_str.isdigit() else 0
+    if code not in (200, 204):
+        raise RuntimeError(f"Discord trả mã {code or 'không rõ (curl lỗi/timeout)'}")
+    log_event("PERIODIC_EMBED", detail=f"Gửi báo cáo 5 phút thành công{' (kèm ảnh)' if shot else ' (không ảnh)'}")
+    print(f"\033[1;32m[+] Đã gửi báo cáo 5 phút{' kèm ảnh' if shot else ''} tới Discord\033[0m")
+
+def _periodic_still_running(rid):
+    return _PERIODIC_RUN["active"] and _PERIODIC_RUN["id"] == rid
+
+def _periodic_report_loop(rid):
+    while _periodic_still_running(rid):
+        deadline = time.time() + PERIODIC_REPORT_SEC
+        while time.time() < deadline:
+            if not _periodic_still_running(rid):
+                return
+            time.sleep(1)
+        try:
+            send_periodic_report_with_shot(get_all_packages())
+        except Exception as e:
+            log_event("PERIODIC_ERR", detail=f"Báo cáo 5 phút lỗi: {e}")
+            print(f"\033[1;31m[!] Báo cáo 5 phút lỗi: {e}\033[0m")
+
+def start_periodic_report():
+    """Khởi động luồng báo cáo 5 phút độc lập với vòng lặp chính."""
+    if not webhook_active():
+        return
+    _PERIODIC_RUN["id"] += 1
+    _PERIODIC_RUN["active"] = True
+    threading.Thread(target=_periodic_report_loop, args=(_PERIODIC_RUN["id"],), daemon=True).start()
+
+def stop_periodic_report():
+    _PERIODIC_RUN["active"] = False
 
 def send_periodic_status_embed(packages):
     if not WEBHOOK_URL:
@@ -3588,8 +3692,9 @@ def report_rejoin_result(pkg, ok, started, action):
     if stop_start:
         return
     took = int(time.time() - started)
+    _net = "" if ok else (" | mạng: " + ("OK" if is_online() else "MẤT"))
     log_event("REJOIN_OK" if ok else "REJOIN_FAIL", pkg,
-              f"{action}; mất {took}s" if ok else f"không vào được Map sau {LAUNCH_MAX_RETRY} lần thử ({action}); mất {took}s",
+              f"{action}; mất {took}s" if ok else f"không vào được Map sau {LAUNCH_MAX_RETRY} lần thử ({action}); mất {took}s{_net}",
               rejoin=REJOIN_COUNT.get(pkg))
     if ok:
         notify_async("success", "Rejoin thành công", f"`{pkg}` đã vào lại Map.", pkg=pkg, action=action, took=took)
@@ -3751,6 +3856,31 @@ def should_auto_backup(pkg):
     return now - LAST_BACKUP.get(pkg, 0) >= BACKUP_INTERVAL_MIN * 60
 
 # ==================== AUTO CLEAR DATA / KHÔI PHỤC TAB KẸT ====================
+TAB_EXTEND = {}  # {pkg: số lần đã gia hạn vì màn hình vẫn đổi}
+TAB_EXTEND_MAX = 3  # tối đa 3 lần gia hạn rồi mới xử lý như cũ
+
+def tab_screen_changing(pkg, gap=5):
+    """True nếu khung hình tab vẫn đổi (đang tải / đang chơi), False nếu đứng yên, None nếu không chụp được."""
+    hashes = []
+    for i in range(2):
+        path = _capture_frame(pkg)
+        if not path:
+            return None
+        try:
+            stats = _frame_luminance_stats(path)
+            h = _frame_hash(path)
+        finally:
+            try:
+                os.remove(path)
+            except Exception:
+                pass
+        if not stats or not h:
+            return None
+        hashes.append(h)
+        if i == 0 and wait_with_stop_check(gap):
+            return None
+    return hashes[0] != hashes[1]
+
 def is_tab_frozen(pkg):
     if not (AUTO_CLEAR_DATA and LOG_SOURCE_WORKS):
         return False
@@ -3767,6 +3897,18 @@ def recover_frozen_tab(pkg):
         log_event("MONITOR", pkg, "chỉ theo dõi: bỏ qua xử lý tab treo")
         return
     now = time.time()
+    if TAB_EXTEND.get(pkg, 0) < TAB_EXTEND_MAX:
+        _changing = tab_screen_changing(pkg)
+        if _changing:
+            TAB_EXTEND[pkg] = TAB_EXTEND.get(pkg, 0) + 1
+            LAST_ACTIVITY[pkg] = time.time()
+            log_event("FREEZE_SKIP", pkg, f"Màn hình vẫn đổi (đang tải/chơi), chưa xóa data ({TAB_EXTEND[pkg]}/{TAB_EXTEND_MAX})")
+            print(f"\033[1;33m[*] {tab_label(pkg)}: không có log nhưng màn hình vẫn đổi, chưa xóa data ({TAB_EXTEND[pkg]}/{TAB_EXTEND_MAX})\033[0m")
+            return
+        if _changing is False:
+            TAB_EXTEND[pkg] = 0
+    else:
+        TAB_EXTEND[pkg] = 0  # đã gia hạn đủ số lần: xử lý bình thường
     in_cooldown = (now - LAST_CLEAR.get(pkg, 0)) < CLEAR_COOLDOWN_SEC
     has_backup = bool(root_mode()) and (backup_size(pkg) > 0 or backup_size(pkg, prev=True) > 0)
     reason = f"Tab treo hơn {FREEZE_TIMEOUT_MIN} phút không có log"
@@ -4715,6 +4857,8 @@ def start_tool():
     if not stop_start and report_on:
         send_webhook(f"Bắt đầu theo dõi {len(packages)} tab clone.", with_image=True)
 
+    start_periodic_report()
+
     start_time = time.time()
     CYCLE_START = start_time
     last_auto_restart = start_time
@@ -4819,6 +4963,10 @@ def start_tool():
                     pass
                 try:
                     screen_ai_tick(packages)
+                except Exception:
+                    pass
+                try:
+                    refresh_update_info()  # tự kiểm tra phiên bản định kỳ (có cache)
                 except Exception:
                     pass
                 try:
@@ -4928,10 +5076,6 @@ def start_tool():
 
             if (time.time() - last_webhook_time) >= 300:
                 last_webhook_time = time.time()
-                if report_on:
-                    print("\033[1;32m[*] Đã đủ 5 phút, đang gửi báo cáo trạng thái định kỳ (Im lặng, không ping)...\033[0m")
-                    t = threading.Thread(target=send_periodic_status_embed, args=(packages,), daemon=True)
-                    t.start()
                 print_status_table(packages)
 
             if RUN_LIMIT_HOURS and START_UP_TIME and (time.time() - last_countdown) >= 60:
@@ -4992,6 +5136,7 @@ def start_tool():
         return
 
     finally:
+        stop_periodic_report()
         restore_screen_after_run()
         NEXT_AUTO_RESTART = None
         for sig, handler in old_handlers.items():
@@ -5448,7 +5593,7 @@ def show_banner():
         print(box_kv("Bộ nhớ", f"{dot(False)} {C.RED}Còn {free_mb} MB, sắp đầy{C.R}", w, lw))
     if update_available():
         update_info = globals().get('UPDATE_INFO', {})
-        print(box_kv("Cập nhật", f"{dot(None)} {C.YEL}Có bản mới {update_info.get('latest', 'N/A')}{C.R}", w, lw))
+        print(box_kv("Cập nhật", f"{dot(None)} {C.YEL}{clip(f'Có bản mới {update_info.get('latest', 'N/A')} — hãy cập nhật để dùng tool tốt nhất', vw - 2)}{C.R}", w, lw))
     _running = _ttl("running", 15, get_running_packages) or []
     _err_recent = time.time() - _LAST_ERROR["t"] < 600
     _dot = f"{C.GRN}●{C.R} {len(_running)} tab chạy" if _running else f"{C.GRY}○ nghỉ{C.R}"
@@ -5477,6 +5622,7 @@ def show_banner():
         ("17", "Anti-AFK"),
         ("18", "Nghe nhạc YouTube"),
         ("19", "Dừng khẩn cấp"),
+        ("20", "Tự động start khi khởi động"),
         ("0", "Exit"),
     ]
 
@@ -5894,8 +6040,10 @@ def login_one_cookie(cookie, idx, total):
         name = res.get("name") or None
         msg_ok(f"Cookie hợp lệ → {res.get('displayName') or name} (@{name}, ID {res.get('id')})")
     elif state is False:
-        msg_err(f"Cookie không dùng được: {res}")
-        return False
+        msg_warn(f"Cookie bị đánh dấu không hợp lệ ({res}).")
+        msg_info("Cookie có thể do tài khoản bị đăng xuất — vẫn có thể ghi vào tab để đăng nhập lại.")
+        if ask("Vẫn ghi cookie vào tab? (y/n):").strip().lower() != "y":
+            return False
     else:
         msg_info(f"Chưa xác minh được cookie ({res}).")
         if ask("Vẫn ghi cookie vào tab? (y/n):").strip().lower() != "y":
@@ -5937,6 +6085,7 @@ def cookie_login_submenu():
         print(f" {C.LPUR}[1]{C.R} {C.WHT}Dán cookie trực tiếp{C.R}")
         print(f" {C.LPUR}[2]{C.R} {C.WHT}Đọc từ file{C.R} {C.GRY}(mỗi dòng 1 cookie){C.R}")
         print(f" {C.LPUR}[3]{C.R} {C.WHT}Lấy từ clipboard{C.R} {C.GRY}(cần Termux:API){C.R}")
+        print(f" {C.LPUR}[4]{C.R} {C.WHT}Batch auto{C.R} {C.GRY}(N cookie → N tab tự động theo thứ tự){C.R}")
         print(f" {C.RED}[0] Quay lại{C.R}")
         print()
         sub = ask("Chọn:").strip()
@@ -5944,13 +6093,69 @@ def cookie_login_submenu():
             msg_info("Quay lại menu chính...")
             time.sleep(0.6)
             return
-        if sub not in ("1", "2", "3"):
+        if sub not in ("1", "2", "3", "4"):
             msg_err(f"Lựa chọn '{sub or '(trống)'}' không hợp lệ.")
             time.sleep(1.2)
             continue
         if not root_mode():
             msg_err("Máy không có root nên không ghi được cookie vào app.")
             time.sleep(2)
+            continue
+
+        if sub == "4":
+            # Batch auto: lấy danh sách tab, ghép cookie theo thứ tự
+            pkgs = list_installed_packages()
+            if not pkgs:
+                msg_err(f"Không tìm thấy package nào khớp '{PACKAGE_PREFIX}'.")
+                wait_enter()
+                continue
+            clear_screen()
+            section_title("BATCH AUTO LOGIN")
+            print(f"{C.GRY}Nhập mỗi dòng 1 cookie. Kết thúc bằng dòng trống.{C.R}")
+            print(f"{C.GRY}Cookie sẽ được ghép tự động với tab theo thứ tự:{C.R}\n")
+            for i, p in enumerate(pkgs, 1):
+                alias = ALIASES.get(p, "")
+                acc = ACCOUNTS.get(p, "")
+                extra = f" ({alias})" if alias else ""
+                acc_txt = f" ← {acc}" if acc else ""
+                print(f"  {C.LPUR}{i}.{C.R} {p}{extra}{C.GRY}{acc_txt}{C.R}")
+            print()
+            lines = []
+            print(f"{C.GRY}Dán cookie (Enter trống để kết thúc):{C.R}")
+            while True:
+                try:
+                    line = getpass.getpass(f" Cookie {len(lines)+1}: ")
+                except Exception:
+                    line = ask(f" Cookie {len(lines)+1}:")
+                if not line.strip():
+                    break
+                c = normalize_cookie(line.strip())
+                if c:
+                    lines.append(c)
+            if not lines:
+                msg_cancel("Không có cookie nào được nhập.")
+                wait_enter()
+                continue
+            pairs = list(zip(lines, pkgs))
+            print(f"\n{C.YEL}Ghép {len(pairs)} cookie → {len(pairs)} tab:{C.R}\n")
+            for c, p in pairs:
+                print(f"  {C.GRY}{cookie_preview(c)}{C.R} → {C.WHT}{p}{C.R}")
+            print()
+            if ask("Xác nhận đăng nhập? (y/n):").strip().lower() != "y":
+                continue
+            done = 0
+            for c, p in pairs:
+                print(f"\n{C.PUR}▸ Đang ghi vào {p}...{C.R}")
+                ok, msg_txt = inject_cookie(p, c)
+                if ok:
+                    NEEDS_LOGIN.discard(p)
+                    msg_ok(f"{p}: xong.")
+                    done += 1
+                else:
+                    msg_err(f"{p}: {msg_txt}")
+            print()
+            msg_info(f"Hoàn tất: {done}/{len(pairs)} tab đã đăng nhập.")
+            ask("Enter để quay lại...")
             continue
 
         if sub == "1":
@@ -6074,24 +6279,17 @@ def get_cookie_account():
 
     print(f"{C.GRY}Lấy .ROBLOSECURITY từ package Roblox trên thiết bị{C.R}\n")
 
-    # Get list of packages to extract from
-    active = get_active_packages()
-    if not active:
-        msg_err("Không có package nào đang chạy.")
+    # Lấy danh sách package để quét
+    pool = list_installed_packages()
+    if not pool:
+        msg_err(f"Không tìm thấy package nào (prefix: {PACKAGE_PREFIX}).")
         wait_enter()
         return
-
-    # If SELECTED_PACKAGES is set, use it; otherwise use all active
-    packages_to_check = list(SELECTED_PACKAGES) if SELECTED_PACKAGES else active
-    if not packages_to_check:
-        packages_to_check = active
+    packages_to_check = [p for p in SELECTED_PACKAGES if p in pool] if SELECTED_PACKAGES else pool
 
     cookies_found = []
 
     for pkg in sorted(packages_to_check):
-        if pkg not in active:
-            continue
-
         print(f"{C.GRY}Kiểm tra {pkg}...{C.R}")
 
         # Try WebView DB first
@@ -6131,25 +6329,32 @@ def get_cookie_account():
         print(f"    {status}")
         print(f"    {cookie_preview(cookie)}\n")
 
-    print(f"{C.LPUR}[1]{C.R} Copy cookie đầu tiên")
-    print(f"{C.LPUR}[2]{C.R} Chọn package để copy")
+    def _copy_to_clipboard(text):
+        """Copy text dùng termux-clipboard-set (Android)"""
+        try:
+            run_cmd(["termux-clipboard-set", text], timeout=5)
+            return True
+        except Exception:
+            return False
+
+    print(f"{C.LPUR}[1]{C.R} Copy cookie đầu tiên vào clipboard")
+    print(f"{C.LPUR}[2]{C.R} Chọn cookie để copy")
     print(f"{C.LPUR}[3]{C.R} Lưu tất cả vào file")
+    print(f"{C.LPUR}[4]{C.R} Dùng cookie để đăng nhập tab khác ngay")
     print(f"{C.RED}[0] Quay lại{C.R}\n")
 
     choice = ask("Chọn:").strip()
 
     if choice == "1":
         cookie = cookies_found[0][1]
-        import subprocess
-        try:
-            subprocess.run(["xclip", "-selection", "clipboard"], input=cookie.encode(), timeout=5)
+        if _copy_to_clipboard(cookie):
             msg_done(f"Đã copy vào clipboard: {cookie_preview(cookie)}")
-        except:
+        else:
             try:
                 with open(COOKIE_FILE_DEFAULT, "w") as f:
                     f.write(cookie)
                 msg_done(f"Clipboard không khả dụng, lưu vào: {COOKIE_FILE_DEFAULT}")
-            except:
+            except Exception:
                 msg_err("Không thể copy/lưu cookie.")
         wait_enter()
 
@@ -6157,16 +6362,14 @@ def get_cookie_account():
         idx = ask(f"Chọn [1-{len(cookies_found)}]:").strip()
         if idx.isdigit() and 1 <= int(idx) <= len(cookies_found):
             cookie = cookies_found[int(idx) - 1][1]
-            import subprocess
-            try:
-                subprocess.run(["xclip", "-selection", "clipboard"], input=cookie.encode(), timeout=5)
+            if _copy_to_clipboard(cookie):
                 msg_done(f"Đã copy vào clipboard: {cookie_preview(cookie)}")
-            except:
+            else:
                 try:
                     with open(COOKIE_FILE_DEFAULT, "w") as f:
                         f.write(cookie)
                     msg_done(f"Lưu vào: {COOKIE_FILE_DEFAULT}")
-                except:
+                except Exception:
                     msg_err("Không thể copy/lưu cookie.")
             wait_enter()
         else:
@@ -6177,8 +6380,6 @@ def get_cookie_account():
         save_file = ask("Nhập tên file (mặc định: cookies.json):").strip() or "cookies.json"
         if not save_file.endswith(".json"):
             save_file += ".json"
-
-        import json
         data = {
             "timestamp": datetime.now().isoformat(),
             "cookies": [
@@ -6186,18 +6387,33 @@ def get_cookie_account():
                     "package": pkg,
                     "cookie": cookie,
                     "preview": cookie_preview(cookie),
-                    "status": status.replace(C.GRN, "").replace(C.RED, "").replace(C.YEL, "").replace(C.R, "").strip()
+                    "status": re.sub(r'\033\[[0-9;]*m', '', status).strip()
                 }
                 for pkg, cookie, status in cookies_found
             ]
         }
-
         try:
             with open(save_file, "w") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
             msg_done(f"Lưu {len(cookies_found)} cookie vào: {save_file}")
         except Exception as e:
             msg_err(f"Lỗi lưu file: {str(e)}")
+        wait_enter()
+
+    elif choice == "4":
+        # Dùng cookie vừa lấy để đăng nhập tab khác
+        if len(cookies_found) == 1:
+            sel_idx = 0
+        else:
+            raw = ask(f"Chọn cookie cần dùng [1-{len(cookies_found)}]:").strip()
+            if not raw.isdigit() or not (1 <= int(raw) <= len(cookies_found)):
+                msg_err("Không hợp lệ.")
+                wait_enter()
+                return
+            sel_idx = int(raw) - 1
+        cookie = cookies_found[sel_idx][1]
+        print(f"\n{C.GRY}Cookie: {cookie_preview(cookie)}{C.R}\n")
+        login_one_cookie(cookie, 1, 1)
         wait_enter()
 
 def menu_cookie_roblox():
@@ -7523,9 +7739,12 @@ def show_log_pages(entries, title):
         for e in chunk:
             for ln in render_log_entry(e, width):
                 print(ln)
-        print(f"\n {C.GRY}Trang {pages - page}/{pages} (mới nhất ở cuối) · Enter = cũ hơn · n = mới hơn · q = thoát{C.R}")
+        _hint = update_hint_line()
+        if _hint:
+            print(f" {_hint}")
+        print(f"\n {C.GRY}Trang {pages - page}/{pages} (mới nhất ở cuối) · Enter = cũ hơn · n = mới hơn · q/b = quay lại{C.R}")
         cmd = input("› ").strip().lower()
-        if cmd in ("q", "0", "x"):
+        if cmd in ("q", "b", "0", "x"):
             return
         page = page - 1 if cmd in ("n", "m") else page + 1
         if page < 0:
@@ -7778,6 +7997,12 @@ def _storage_watch():
     _STORAGE_STATE["last_warn"] = now
     log_event("WARN", detail=f"Bộ nhớ trống chỉ còn {free} MB, nên xóa cache hoặc log cũ")
 
+_LOG_LAST_VIEW = {"v": None}
+
+def _log_view(entries, mode, arg, title):
+    _LOG_LAST_VIEW["v"] = (mode, arg, title)
+    show_log_pages(filter_log(entries, mode, arg), title)
+
 def menu_view_log():
     while True:
         clear_screen()
@@ -7789,6 +8014,9 @@ def menu_view_log():
             size_kb = 0
         n_err = sum(1 for e in entries if e["kind"] in LOG_ERROR_KINDS)
         print(f" {C.GRY}{LOG_FILE}  ·  {len(entries)} dòng ({size_kb} KB) · {n_err} lỗi{C.R}")
+        _hint = update_hint_line()
+        if _hint:
+            print(f" {_hint}")
         print(f"{C.LPUR}[1]{C.R} {C.WHT}Xem log mới nhất{C.R}")
         print(f"{C.LPUR}[2]{C.R} {C.WHT}Chỉ xem lỗi (Kick / Crash / Treo / Lobby / Rejoin thất bại...){C.R}")
         print(f"{C.LPUR}[3]{C.R} {C.WHT}Phiên chạy gần nhất (từ lần Start cuối){C.R}")
@@ -7801,6 +8029,7 @@ def menu_view_log():
         print(f"{C.LPUR}[10]{C.R} {C.WHT}Xuất log theo ngày ra file văn bản{C.R}")
         print(f"{C.LPUR}[11]{C.R} {C.WHT}Hỏi AI về log{C.R}")
         print(f"{C.LPUR}[12]{C.R} {C.WHT}Phân loại lỗi 7 ngày (gom nhóm, AI đặt tên nguyên nhân){C.R}")
+        print(f"{C.LPUR}[r]{C.R} {C.WHT}Xem lại bộ lọc vừa dùng{C.R}")
         print(f"{C.RED}[0] Quay lại menu chính{C.R}")
         sub = input("Chọn: ").strip()
         if sub == "7":
@@ -7821,12 +8050,19 @@ def menu_view_log():
         if sub == "12":
             menu_classify_errors()
             continue
+        if sub == "r":
+            if _LOG_LAST_VIEW["v"]:
+                _log_view(entries, *_LOG_LAST_VIEW["v"])
+            else:
+                msg_warn("Chưa có bộ lọc nào được dùng.")
+                wait_enter()
+            continue
         if sub == "1":
-            show_log_pages(filter_log(entries), "LOG MỚI NHẤT")
+            _log_view(entries, "all", None, "LOG MỚI NHẤT")
         elif sub == "2":
-            show_log_pages(filter_log(entries, "errors"), "LOG LỖI")
+            _log_view(entries, "errors", None, "LOG LỖI")
         elif sub == "3":
-            show_log_pages(filter_log(entries, "session"), "PHIÊN GẦN NHẤT")
+            _log_view(entries, "session", None, "PHIÊN GẦN NHẤT")
         elif sub == "4":
             pkgs = sorted({e["pkg"] for e in entries if e["pkg"]})
             if not pkgs:
@@ -7837,11 +8073,11 @@ def menu_view_log():
                 print(f"\033[1;37m{i}. {tab_label(p)}\033[0m")
             pick = input("Chọn tab (Enter để hủy): ").strip()
             if pick.isdigit() and 1 <= int(pick) <= len(pkgs):
-                show_log_pages(filter_log(entries, "pkg", pkgs[int(pick) - 1]), f"LOG TAB {tab_label(pkgs[int(pick) - 1])}")
+                _log_view(entries, "pkg", pkgs[int(pick) - 1], f"LOG TAB {tab_label(pkgs[int(pick) - 1])}")
         elif sub == "5":
             kw = input("Nhập từ khóa hoặc mã lỗi (vd 279, kick, treo): ").strip()
             if kw:
-                show_log_pages(filter_log(entries, "search", kw), f"TÌM '{kw}'")
+                _log_view(entries, "search", kw, f"TÌM '{kw}'")
         elif sub == "6":
             if input("Xóa toàn bộ log? Không thể khôi phục. (y/N): ").strip().lower() == "y":
                 try:
@@ -8902,6 +9138,14 @@ def search_packages_by_keyword():
     old_attr = termios.tcgetattr(fd)
     state = {"filt": "", "offset": 0, "msg": ""}
 
+    # Load app labels nền — không block UI
+    def _preload_labels():
+        for pkg in packages:
+            if pkg not in _APP_LABEL_CACHE:
+                get_app_label(pkg)
+    import threading as _threading
+    _threading.Thread(target=_preload_labels, daemon=True).start()
+
     def term_size():
         try:
             sz = os.get_terminal_size()
@@ -8910,7 +9154,18 @@ def search_packages_by_keyword():
             return 24, 80
 
     def visible(filt):
-        return [p for p in packages if filt in p.lower()] if filt else packages
+        if not filt:
+            return packages
+        f = filt.lower()
+        result = []
+        for p in packages:
+            if f in p.lower():
+                result.append(p)
+                continue
+            label = _APP_LABEL_CACHE.get(p)
+            if label and f in label.lower():
+                result.append(p)
+        return result
 
     def page_size():
         lines, _ = term_size()
@@ -8934,11 +9189,13 @@ def search_packages_by_keyword():
             idx = state["offset"] + r
             if idx < len(shown):
                 pkg = shown[idx]
+                label = _APP_LABEL_CACHE.get(pkg, "")
+                label_part = f" [{label}]" if label and label != pkg else ""
                 text = pkg if len(pkg) <= width else pkg[:width - 1] + "…"
                 alias = ALIASES.get(pkg, "")
                 alias_part = f" ({alias})" if alias else ""
                 tag = " [prefix]" if PACKAGE_PREFIX and pkg.startswith(PACKAGE_PREFIX) else ""
-                rows.append(f"{C.WHT}{idx + 1:4}. {text}{C.R}{C.GRY}{alias_part}{tag}{C.R}")
+                rows.append(f"{C.WHT}{idx + 1:4}. {text}{C.R}{C.GRN}{label_part}{C.R}{C.GRY}{alias_part}{tag}{C.R}")
             else:
                 rows.append("")
         rows.append("")
@@ -9111,20 +9368,31 @@ def check_game_target(value):
     global VIP_EXPIRED_PHRASES
     value = value.strip()
     if value.isdigit():
-        url = "https://games.roblox.com/v1/games/multiget-place-details?placeIds=" + value
-        r = _fetch_isolated(url)
+        # multiget-place-details trả 401 (cần đăng nhập): đổi sang chuỗi công khai place -> universe -> tên game
+        r = _fetch_isolated(f"https://apis.roblox.com/universes/v1/places/{value}/universe")
         if not r.get("ok"):
+            if r.get("status") == 404:
+                return False, f"Game ID {value} không tồn tại hoặc đã bị gỡ.", None
             return None, f"Không kiểm tra được Game ID ({r.get('error', 'lỗi mạng')}). Vẫn có thể dùng ID này.", None
         try:
-            data = json.loads(r.get("body", ""))
+            uid = json.loads(r.get("body", "")).get("universeId")
         except Exception:
             return None, "Không kiểm tra được Game ID (phản hồi lạ từ Roblox).", None
-        if isinstance(data, list):
-            if not data:
-                return False, f"Game ID {value} không tồn tại hoặc đã bị gỡ.", None
-            name = data[0].get("name") or f"Game ID: {value}"
+        if not isinstance(uid, int):
+            return None, "Không kiểm tra được Game ID (phản hồi lạ từ Roblox).", None
+        _UNIVERSE_ID_CACHE[value] = uid
+        r2 = _fetch_isolated(f"https://games.roblox.com/v1/games?universeIds={uid}")
+        name = None
+        if r2.get("ok"):
+            try:
+                rows = json.loads(r2.get("body", "")).get("data", [])
+                if rows:
+                    name = rows[0].get("name")
+            except Exception:
+                name = None
+        if name:
             return True, f"Game hợp lệ: {name}", name
-        return None, "Không kiểm tra được Game ID (phản hồi lạ từ Roblox).", None
+        return True, f"Game ID hợp lệ (universe {uid}). Không lấy được tên game.", None
 
     if value.lower().startswith(("https://", "http://")) and "roblox" in value.lower():
         r = _fetch_isolated(value, 300000)
@@ -9445,80 +9713,6 @@ def menu_screen_guard():
             wait_enter()
         else:
             invalid_choice(sub)
-
-UPDATE_DOWNLOAD_URL = "https://pain-tool-rejoin-bot.apps.bot-hosting.cloud/api/download/latest"
-
-def _download_and_verify_update(latest):
-    """Tải bản mới vào file tạm và kiểm tra trước khi dùng.
-    Trả về (ok, lỗi_hoặc_đường_dẫn_tạm). Không đụng tới file đang chạy."""
-    tmp_path = os.path.abspath(__file__) + ".new"
-    try:
-        r = _fetch_isolated(UPDATE_DOWNLOAD_URL, 5000000, timeout=30)
-        if not r.get("ok"):
-            return False, f"không tải được bản cập nhật ({r.get('error', 'mạng lỗi')})"
-        raw = r.get("body", "").encode("utf-8")
-        if len(raw) < 5000:
-            return False, "file tải về quá nhỏ, có thể server đang lỗi"
-        text = raw.decode("utf-8")
-        m = re.search(r'^VERSION\s*=\s*"([^"]+)"', text, re.MULTILINE)
-        if not m or _parse_ver(m.group(1)) != _parse_ver(latest):
-            return False, f"file tải về không đúng phiên bản {latest}"
-        compile(text, tmp_path, "exec")  # chỉ kiểm tra cú pháp, không chạy
-        with open(tmp_path, "wb") as f:
-            f.write(raw)
-        return True, tmp_path
-    except SyntaxError as e:
-        return False, f"file tải về bị lỗi cú pháp (dòng {e.lineno})"
-    except Exception as e:
-        return False, f"lỗi tải: {e}"
-
-def perform_tool_update(latest):
-    """Cập nhật tool lên bản `latest`. Thành công thì khởi động lại, thất bại trả về (False, lý_do)."""
-    current_file = os.path.abspath(__file__)
-    if not current_file.endswith(".py"):
-        return False, "bản đang chạy là file binary (.so), tải lại file .py từ GitHub"
-    try:
-        ok, info = with_spinner("Đang tải bản cập nhật", _download_and_verify_update, latest)
-    except Exception as e:
-        return False, f"hết thời gian chờ ({e})"
-    if not ok:
-        return False, f"{info}. Tool hiện tại vẫn an toàn, không bị thay đổi"
-    try:
-        backup_file = current_file + ".backup"
-        shutil.copy(current_file, backup_file)
-        os.replace(info, current_file)  # thay file một bước, tránh file nửa vời
-    except Exception as e:
-        return False, f"không ghi được file cập nhật ({e})"
-    msg_done("Cập nhật thành công! Đang khởi động lại...")
-    print(f"{C.GRY}(File backup: {backup_file}){C.R}")
-    time.sleep(2)
-    os.execl(sys.executable, sys.executable, current_file)
-
-def menu_update_tool():
-    """Set up > Update Tool: kiểm tra và cập nhật tool từ server"""
-    clear_screen()
-    section_title("UPDATE TOOL")
-    print(f" {C.GRY}Phiên bản đang dùng: {VERSION}{C.R}")
-    refresh_update_info(force=True)
-    st = UPDATE_INFO.get("status")
-    if st == "fail":
-        msg_warn("Không kiểm tra được phiên bản (mất kết nối).")
-        wait_enter()
-        return
-    if st == "latest":
-        msg_done(f"Bạn đang dùng bản mới nhất ({VERSION}).")
-        wait_enter()
-        return
-    latest = UPDATE_INFO.get("latest")
-    print(f"\n{C.GRN}Phiên bản mới: {latest} (đang dùng {VERSION}){C.R}\n")
-    print(f"{C.YEL}[1] Cập nhật ngay{C.R}")
-    print(f"{C.RED}[0] Bỏ qua{C.R}\n")
-    if ask("Chọn:").strip() != "1":
-        return
-    ok, reason = perform_tool_update(latest)
-    if not ok:
-        msg_err(f"Cập nhật thất bại: {reason}.")
-        wait_enter()
 
 def menu_quiet_hours():
     while True:
@@ -9854,12 +10048,11 @@ def menu_setup():
         print(f"{C.LPUR}[14]{C.R} {C.WHT}Phát hiện màn hình trắng/đen & GUI đứng [{screen_guard_label()}]{C.R}")
         print(f"{C.LPUR}[15]{C.R} {C.WHT}Auto Server Hop (đổi server khi lag) [{hop_label()}]{C.R}")
         print(f"{C.LPUR}[16]{C.R} {C.WHT}Pain AI{C.R}")
-        print(f"{C.LPUR}[17]{C.R} {C.WHT}Update Tool{C.R}")
-        print(f"{C.LPUR}[18]{C.R} {C.WHT}Giờ im lặng cảnh báo [{'Bật' if QUIET_HOURS.get('enabled') else 'Tắt'}]{C.R}")
-        print(f"{C.LPUR}[19]{C.R} {C.WHT}Giới hạn thời gian chạy [{'Bật' if STOP_TIMER.get('enabled') else 'Tắt'}]{C.R}")
-        print(f"{C.LPUR}[20]{C.R} {C.WHT}Chế độ chỉ theo dõi [{'Bật' if MONITOR_ONLY else 'Tắt'}]{C.R}")
-        print(f"{C.LPUR}[21]{C.R} {C.WHT}Lưu ảnh khi có lỗi nghiêm trọng [{'Bật' if SCREEN_ARCHIVE.get('enabled') else 'Tắt'}]{C.R}")
-        print(f"{C.LPUR}[22]{C.R} {C.WHT}Set up cấu hình{C.R}")
+        print(f"{C.LPUR}[17]{C.R} {C.WHT}Giờ im lặng cảnh báo [{'Bật' if QUIET_HOURS.get('enabled') else 'Tắt'}]{C.R}")
+        print(f"{C.LPUR}[18]{C.R} {C.WHT}Giới hạn thời gian chạy [{'Bật' if STOP_TIMER.get('enabled') else 'Tắt'}]{C.R}")
+        print(f"{C.LPUR}[19]{C.R} {C.WHT}Chế độ chỉ theo dõi [{'Bật' if MONITOR_ONLY else 'Tắt'}]{C.R}")
+        print(f"{C.LPUR}[20]{C.R} {C.WHT}Lưu ảnh khi có lỗi nghiêm trọng [{'Bật' if SCREEN_ARCHIVE.get('enabled') else 'Tắt'}]{C.R}")
+        print(f"{C.LPUR}[21]{C.R} {C.WHT}Set up cấu hình{C.R}")
         print(f"{C.RED}[0] Quay lại menu chính{C.R}")
         sub = input("Chọn: ").strip()
         if sub == "1":
@@ -9911,22 +10104,19 @@ def menu_setup():
             announce_choice("16", "Pain AI")
             menu_ai_setup()
         elif sub == "17":
-            announce_choice("17", "Update Tool")
-            menu_update_tool()
-        elif sub == "18":
-            announce_choice("18", "Giờ im lặng cảnh báo")
+            announce_choice("17", "Giờ im lặng cảnh báo")
             menu_quiet_hours()
-        elif sub == "19":
-            announce_choice("19", "Giới hạn thời gian chạy")
+        elif sub == "18":
+            announce_choice("18", "Giới hạn thời gian chạy")
             menu_stop_timer()
-        elif sub == "20":
-            announce_choice("20", "Chế độ chỉ theo dõi")
+        elif sub == "19":
+            announce_choice("19", "Chế độ chỉ theo dõi")
             toggle_monitor_only()
-        elif sub == "21":
-            announce_choice("21", "Lưu ảnh khi có lỗi nghiêm trọng")
+        elif sub == "20":
+            announce_choice("20", "Lưu ảnh khi có lỗi nghiêm trọng")
             toggle_screen_archive()
-        elif sub == "22":
-            announce_choice("22", "Set up cấu hình")
+        elif sub == "21":
+            announce_choice("21", "Set up cấu hình")
             menu_config_io()
         elif sub == "0":
             msg_info("Quay lại menu chính...")
@@ -9934,6 +10124,124 @@ def menu_setup():
             break
         else:
             invalid_choice(sub)
+
+_APP_LABEL_CACHE = {}
+
+def get_app_label(pkg):
+    """Lấy tên hiển thị của app từ package name. Cache lại để tránh gọi lại."""
+    if pkg in _APP_LABEL_CACHE:
+        return _APP_LABEL_CACHE[pkg]
+    label = None
+    # Cách 1: aapt dump badging
+    apk_path = run_cmd(["pm", "path", pkg]).strip()
+    if apk_path.startswith("package:"):
+        apk = apk_path.split(":", 1)[1].strip()
+        out = run_cmd(["aapt", "dump", "badging", apk], timeout=6)
+        for line in out.splitlines():
+            if line.startswith("application-label:"):
+                label = line.split(":", 1)[1].strip().strip("'")
+                break
+    # Cách 2: dumpsys package (fallback)
+    if not label:
+        out = run_cmd(["dumpsys", "package", pkg], timeout=6)
+        for line in out.splitlines():
+            ln = line.strip()
+            if ln.lower().startswith("nonlocalizedlabel="):
+                v = ln.split("=", 1)[1].strip()
+                if v and v != "null":
+                    label = v
+                    break
+    if not label:
+        label = pkg
+    _APP_LABEL_CACHE[pkg] = label
+    return label
+
+def search_packages_by_name(query):
+    """Tìm package theo tên app hiển thị hoặc package name. Trả về [(pkg, label)]."""
+    q = query.lower().strip()
+    out = run_cmd(["pm", "list", "packages"])
+    all_pkgs = [ln.split(":", 1)[1].strip() for ln in out.splitlines() if ":" in ln]
+    results = []
+    for pkg in sorted(all_pkgs):
+        # Khớp nhanh theo package name trước
+        if q in pkg.lower():
+            label = get_app_label(pkg)
+            results.append((pkg, label))
+            continue
+        # Lấy label và kiểm tra
+        label = get_app_label(pkg)
+        if q in label.lower():
+            results.append((pkg, label))
+    return results
+
+def menu_search_package():
+    """Tìm kiếm package theo tên app, có thể thêm vào Custom Package List"""
+    while True:
+        clear_screen()
+        section_title("TÌM KIẾM PACKAGE THEO TÊN APP")
+        print(f" {C.GRY}Nhập tên app để tìm package.{C.R}")
+        print(f" {C.GRY}Ví dụ: 'Roblox 01' → com.roblox.clone1{C.R}\n")
+        query = ask("Nhập tên app (0 để quay lại):").strip()
+        if query == "0" or query == "":
+            return
+
+        print(f"\n{C.YEL}Đang tìm kiếm...{C.R}")
+        results = search_packages_by_name(query)
+
+        clear_screen()
+        section_title("KẾT QUẢ TÌM KIẾM")
+        print(f" {C.GRY}Từ khóa: {C.WHT}{query}{C.R}\n")
+
+        if not results:
+            print(f" {C.RED}Không tìm thấy app nào khớp với '{query}'.{C.R}\n")
+            wait_enter()
+            continue
+
+        print(f" {C.GRN}Tìm thấy {len(results)} kết quả:{C.R}\n")
+        for i, (pkg, label) in enumerate(results, 1):
+            in_custom = f" {C.GRN}[đã có trong Custom List]{C.R}" if pkg in CUSTOM_PACKAGES else ""
+            print(f" {C.LPUR}[{i:2}]{C.R} {C.WHT}{label}{C.R}{in_custom}")
+            print(f"       {C.GRY}{pkg}{C.R}")
+
+        print(f"\n {C.LPUR}[a]{C.R} {C.WHT}Thêm tất cả vào Custom List{C.R}")
+        print(f" {C.LPUR}[s]{C.R} {C.WHT}Chọn số để thêm (vd: 1 2 3){C.R}")
+        print(f" {C.LPUR}[t]{C.R} {C.WHT}Tìm lại{C.R}")
+        print(f" {C.RED}[0] Quay lại{C.R}\n")
+
+        cmd = ask("Chọn:").strip().lower()
+        if cmd == "0":
+            return
+        elif cmd == "t":
+            continue
+        elif cmd == "a":
+            added = []
+            for pkg, label in results:
+                if pkg not in CUSTOM_PACKAGES:
+                    CUSTOM_PACKAGES.append(pkg)
+                    added.append(label)
+            if added:
+                save_config_file()
+                msg_done(f"Đã thêm {len(added)} package vào Custom List.")
+            else:
+                msg_info("Tất cả đã có trong Custom List rồi.")
+            wait_enter()
+        elif cmd == "s":
+            raw = ask("Nhập số thứ tự (vd: 1 2 3):").strip()
+            added = []
+            for part in raw.replace(",", " ").split():
+                if part.isdigit() and 1 <= int(part) <= len(results):
+                    pkg, label = results[int(part) - 1]
+                    if pkg not in CUSTOM_PACKAGES:
+                        CUSTOM_PACKAGES.append(pkg)
+                        added.append(label)
+            if added:
+                save_config_file()
+                msg_done(f"Đã thêm: {', '.join(added)}")
+            else:
+                msg_info("Không có package mới nào được thêm.")
+            wait_enter()
+        else:
+            invalid_choice(cmd)
 
 def menu_package_prefix():
     """Menu 3: [1] Package mode, [2] Chọn mode package muốn chạy"""
@@ -10150,28 +10458,37 @@ def menu_change_id():
     wait_enter()
 
 def send_test_webhook(url, content, embed_title, embed_desc):
-    """Gửi tin thử tới webhook. Trả về (ok, thông báo)."""
-    payload = {
+    """Gửi tin thử tới webhook qua curl (tránh segfault SSL của urllib trên Android).
+    Trả về (ok, thông báo)."""
+    payload = json.dumps({
         "content": content,
         "allowed_mentions": {"parse": ["everyone", "users"]},
         "embeds": [{"title": embed_title, "description": embed_desc, "color": 0x57F287}],
-    }
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json", "User-Agent": "PainTool/1.0"},
-        method="POST",
-    )
+    })
+    import subprocess, shlex
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            code = resp.status
+        r = subprocess.run(
+            ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+             "-X", "POST", url,
+             "-H", "Content-Type: application/json",
+             "-H", "User-Agent: PainTool/1.0",
+             "--data-raw", payload,
+             "--max-time", "15", "--connect-timeout", "10"],
+            capture_output=True, text=True, timeout=20
+        )
+        code_str = (r.stdout or "").strip()
+        code = int(code_str) if code_str.isdigit() else 0
         if code in (200, 204):
             return True, f"HTTP {code}"
+        if code == 0:
+            return False, f"curl lỗi: {(r.stderr or '').strip()[:80] or 'không rõ'}"
         return False, f"HTTP {code}"
-    except urllib.error.HTTPError as e:
-        return False, f"HTTP {e.code}"
+    except subprocess.TimeoutExpired:
+        return False, "Timeout (>20s)"
+    except FileNotFoundError:
+        return False, "curl không tìm thấy — cài bằng: pkg install curl"
     except Exception as e:
-        return False, str(e)
+        return False, str(e)[:80]
 
 def menu_webhook():
     global WEBHOOK_URL
@@ -10190,10 +10507,12 @@ def menu_webhook():
     save_config_file()
     if WEBHOOK_URL:
         global DISCORD_UID
-        uid = input("Nhập Discord ID để ping (để trống để ping @everyone): ").strip()
-        if uid and not (uid.isdigit() and 17 <= len(uid) <= 20):
-            msg_err("Discord ID không hợp lệ (cần 17–20 chữ số). Sẽ ping @everyone.")
-            uid = ""
+        _prev_uid = DISCORD_UID
+        uid = input("Nhập Discord ID để ping (Enter = @everyone): ").strip()
+        if uid:
+            uid = parse_discord_uid(uid) or ""
+            if not uid:
+                msg_err("Discord ID không hợp lệ (cần 17–20 chữ số, hoặc dạng <@id>). Sẽ ping @everyone.")
         DISCORD_UID = uid
         save_config_file()
         mention = "@everyone" + (f" <@{DISCORD_UID}>" if DISCORD_UID else "")
