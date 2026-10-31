@@ -36,7 +36,7 @@ except ImportError:
                     key, val = line.split('=', 1)
                     os.environ[key.strip()] = val.strip().strip('"').strip("'")
 
-VERSION = "v3.4.5"
+VERSION = "v3.4.8"
 
 # ==================== GLOBAL CONSTANTS (SERVER_URL / SECRET_KEY) ====================
 SERVER_URL = "https://pain-tool-rejoin-bot.apps.bot-hosting.cloud/api/verify"
@@ -428,28 +428,53 @@ def print_status_table(packages=None):
                 nxt = "—"
         else:
             nxt = "không theo chu kỳ (dò lỗi liên tục)"
-        sw, rw, mw, ew = 11, 3, 7, 8
-        nw = max(8, inner - sw - rw - mw - ew - 4)
+
+        def kv(label, value, plain=None):
+            # Giá trị dài được cắt theo độ rộng khung, không làm vỡ viền
+            room = max(4, inner - 12 - 1)
+            if plain is not None:
+                value = clip(plain, room)
+            print(box_row(f"{C.GRY}{pad(label, 12)}{C.R} {value}", w))
+
+        # Bố cục bảng theo độ rộng còn lại: đủ cột khi rộng, bớt cột khi khung hẹp
+        if inner >= 45:
+            sw, rw, mw, ew = 11, 3, 7, 8
+            show_exec, show_map = True, True
+        elif inner >= 34:
+            sw, rw, mw, ew = 8, 3, 7, 0
+            show_exec, show_map = False, True
+        else:
+            sw, rw, mw, ew = 8, 3, 0, 0
+            show_exec, show_map = False, False
+        gaps = 1 + (1 if show_exec else 0) + (1 if show_map else 0) + 1
+        nw = max(6, inner - sw - rw - mw - ew - gaps)
         states = [(pkg,) + tab_state(pkg) for pkg in packages]
         running = sum(1 for _p, _t, st in states if st is not False)
         print(box_top(w))
         print(box_row(f"{C.WHT}TRẠNG THÁI TAB{C.R}", w, "center"))
         print(box_sep(w))
-        print(box_kv("Chạy tổng", f"{C.WHT}{total}{C.R}", w))
-        print(box_kv("Cơ chế", f"{C.WHT}{get_rejoin_mode_str()}{C.R}", w))
-        print(box_kv("Rejoin kế", f"{C.WHT}{nxt}{C.R}", w))
+        kv("Chạy tổng", f"{C.WHT}{total}{C.R}")
+        kv("Cơ chế", f"{C.WHT}{get_rejoin_mode_str()}{C.R}", plain=get_rejoin_mode_str())
+        kv("Rejoin kế", f"{C.WHT}{nxt}{C.R}", plain=nxt)
         if RUN_LIMIT_HOURS and START_UP_TIME:
             left_s = RUN_LIMIT_HOURS * 3600 - (now - START_UP_TIME.timestamp())
             col_left = C.YEL if left_s < 600 else C.WHT
-            print(box_kv("Còn lại", f"{col_left}{fmt_duration(max(0, left_s))}{C.R}", w))
+            kv("Còn lại", f"{col_left}{fmt_duration(max(0, left_s))}{C.R}", plain=fmt_duration(max(0, left_s)))
         if GAME_STATUS_PAUSED:
-            print(box_kv("Game", f"{C.YEL}Tạm dừng rejoin — {clip(GAME_STATUS_REASON, inner - 24)}{C.R}", w))
+            kv("Game", f"{C.YEL}Tạm dừng rejoin — {clip(GAME_STATUS_REASON, inner - 24)}{C.R}",
+               plain=f"Tạm dừng rejoin — {GAME_STATUS_REASON}")
         if NEXT_AUTO_RESTART and AUTO_RESTART_HOURS:
             rl = NEXT_AUTO_RESTART - now
-            print(box_kv("Restart kế", f"{C.WHT}{fmt_duration(rl) if rl > 0 else 'sắp tới'} ({auto_restart_label()}){C.R}", w))
-        print(box_kv("Tab chạy", f"{C.WHT}{running}/{len(packages)}{C.R}", w))
+            txt = f"{fmt_duration(rl) if rl > 0 else 'sắp tới'} ({auto_restart_label()})"
+            kv("Restart kế", f"{C.WHT}{txt}{C.R}", plain=txt)
+        kv("Tab chạy", f"{C.WHT}{running}/{len(packages)}{C.R}")
         print(box_sep(w))
-        print(box_row(f"{C.GRY}{pad('Tab', nw)} {pad('Trạng thái', sw)} {pad('RJ', rw)} {pad('Executor', ew)} {pad('Map', mw)}{C.R}", w))
+
+        st_label = "Trạng thái" if sw >= 10 else "Trạng"
+        head = [pad("Tab", nw), pad(st_label, sw), pad("RJ", rw)]
+        if show_exec: head.append(pad("Executor", ew))
+        if show_map: head.append(pad("Map", mw))
+        print(box_row(f"{C.GRY}{' '.join(head)}{C.R}", w))
         for pkg, text, st in states:
             short = pkg[len(PACKAGE_PREFIX):].lstrip(".") if pkg.startswith(PACKAGE_PREFIX) and pkg != PACKAGE_PREFIX else pkg
             if ALIASES.get(pkg):
@@ -459,9 +484,12 @@ def print_status_table(packages=None):
             in_map = fmt_duration(now - JOINED_AT[pkg]) if pkg in JOINED_AT and st else "—"
             exe = EXECUTOR_BINDING.get(pkg, "—")
             exe_display = exe if exe in EXECUTOR_NAMES else "—"
-            row = (f"{pad(clip(short, nw), nw)} {pad(dot(st) + ' ' + clip(text, sw - 2), sw)} "
-                   f"{pad(str(REJOIN_COUNT.get(pkg, 0)), rw)} {pad(exe_display, ew)} {pad(in_map, mw)}")
-            print(box_row(row, w))
+            cells = [pad(clip(short, nw), nw),
+                     pad(dot(st) + " " + clip(text, max(1, sw - 2)), sw),
+                     pad(str(REJOIN_COUNT.get(pkg, 0)), rw)]
+            if show_exec: cells.append(pad(clip(exe_display, ew), ew))
+            if show_map: cells.append(pad(clip(in_map, mw), mw))
+            print(box_row(" ".join(cells), w))
         print(box_bot(w))
     except Exception as e:
         print(f"\033[1;31m[!] Không hiển thị được bảng trạng thái: {e}\033[0m")
@@ -530,6 +558,10 @@ EXECUTOR_BINDING = {}
 
 # ==================== CUSTOM PACKAGES (User-defined) ====================
 CUSTOM_PACKAGES = []
+
+# ==================== ANDROID ID (Change ID) ====================
+ANDROID_ID_ORIGINAL = ""   # ID gốc, lưu lần đổi đầu tiên để khôi phục
+ANDROID_ID_HISTORY = []     # [{"time":..., "id":...}] tối đa 10 mục
 
 # ==================== PACKAGE MODE ====================
 # "prefix" = Prefix Mode (mặc định), "custom" = Custom Package List Mode
@@ -1365,6 +1397,11 @@ def load_saved_config():
                     "game_id": game_data.get("game_id", ""),
                 }
 
+    global ANDROID_ID_ORIGINAL, ANDROID_ID_HISTORY
+    ANDROID_ID_ORIGINAL = str(data.get("android_id_original", "") or "")
+    hist = data.get("android_id_history")
+    if isinstance(hist, list):
+        ANDROID_ID_HISTORY = [h for h in hist if isinstance(h, dict) and h.get("id")][-10:]
     cp = data.get("custom_packages")
     if isinstance(cp, list):
         CUSTOM_PACKAGES.clear()
@@ -1440,6 +1477,8 @@ def _build_config_dict():
             },
             "custom_packages": CUSTOM_PACKAGES,
             "package_mode": PACKAGE_MODE,
+            "android_id_original": ANDROID_ID_ORIGINAL,
+            "android_id_history": ANDROID_ID_HISTORY,
             # API key không được lưu
             # "ai_api_key": AI_API_KEY,
             # "ai_enabled": AI_ENABLED
@@ -1564,12 +1603,43 @@ def clip(s, n):
         w += _cw(ch)
     return out + "…"
 
+_DPI_CACHE = {"value": None, "done": False}
+UI_REF_DPI = 420   # DPI tham chiếu: máy ở mức này dùng khung 58 cột
+
+def device_dpi():
+    """Đọc DPI của máy (getprop, dự phòng wm density). Trả về None nếu không đọc được."""
+    if _DPI_CACHE["done"]:
+        return _DPI_CACHE["value"]
+    dpi = None
+    try:
+        v = run_cmd(["getprop", "ro.sf.lcd_density"], timeout=3).strip()
+        if v.isdigit():
+            dpi = int(v)
+    except Exception:
+        pass
+    if not dpi:
+        try:
+            out = sh("wm density", timeout=5)
+            m = re.search(r"(?:Override|Physical) density:\s*(\d+)", out)
+            if m:
+                dpi = int(m.group(1))
+        except Exception:
+            pass
+    _DPI_CACHE["value"] = dpi
+    _DPI_CACHE["done"] = True
+    return dpi
+
 def ui_width():
+    """Độ rộng khung viền mục. Tự co theo DPI của máy, không vượt số cột thật của terminal."""
     try:
         cols = shutil.get_terminal_size((58, 24)).columns
     except Exception:
         cols = 58
-    return max(44, min(cols, 58))
+    target = 58
+    dpi = device_dpi()
+    if dpi and dpi > 0:
+        target = round(58 * UI_REF_DPI / dpi)
+    return max(30, min(cols, target, 58))
 
 def pad(text, width, align="left"):
     gap = max(0, width - vlen(text))
@@ -2839,7 +2909,7 @@ def format_alert_description(pkg, reason, took=None):
     lines = []
 
     if pkg:
-        tab_name = ALIASES.get(pkg) if ALIASES.get(pkg) else pkg[len(PACKAGE_PREFIX):].lstrip(".")
+        tab_name = ALIASES.get(pkg) if ALIASES.get(pkg) else _short_pkg(pkg)
         lines.append(f"**Tab:** `{tab_name}`")
 
     if reason:
@@ -2868,7 +2938,7 @@ def send_detailed_alert(level, title, description, pkg=None, reason=None, action
         fields = []
 
         if pkg:
-            tab_alias = ALIASES.get(pkg) or pkg[len(PACKAGE_PREFIX):].lstrip(".")
+            tab_alias = ALIASES.get(pkg) or _short_pkg(pkg)
             fields.append({
                 "name": "📦 Tab",
                 "value": f"`{tab_alias}`\n`{pkg}`",
@@ -3065,94 +3135,69 @@ def handle_send_text():
 
 # ==================== PERIODIC STATUS EMBED (5 MINUTES) ====================
 def build_status_embed(packages):
+    """Embed báo cáo 5 phút, trình bày giống embed cảnh báo (author có icon + nhãn, màu theo mức, footer Alert System)."""
     try:
         now = time.time()
-
         running_tabs = [p for p in packages if is_app_running(p)]
+        in_map_tabs = [p for p in running_tabs if p in JOINED_AT and is_app_in_foreground(p)]
+        not_ok = [p for p in packages if p not in in_map_tabs]
+        total = len(packages)
         total_uptime = now - START_UP_TIME.timestamp() if START_UP_TIME else 0
         total_rejoin = sum(REJOIN_COUNT.values())
-        in_map_tabs = [p for p in running_tabs if p in JOINED_AT and is_app_in_foreground(p)]
 
-        fields = []
+        # Mức như embed cảnh báo: đỏ = không tab nào chạy, vàng = có tab chưa vào map, xanh = ổn
+        if total == 0 or not running_tabs:
+            level = "critical"
+            state = "KHÔNG CÓ TAB NÀO CHẠY"
+        elif not_ok:
+            level = "warn"
+            state = f"{len(not_ok)} TAB CHƯA VÀO MAP"
+        else:
+            level = "success"
+            state = "TẤT CẢ TAB ỔN"
+        style = ALERT_STYLES[level]
 
-        fields.append({
-            "name": "📊 Trạng thái Tab",
-            "value": f"**Chạy:** {len(running_tabs)}/{len(packages)} | **Trong Map:** {len(in_map_tabs)}",
-            "inline": True
-        })
+        fields = [
+            {"name": "📦 Tab", "value": f"`{len(running_tabs)}/{total}` đang chạy\n`{len(in_map_tabs)}` trong Map", "inline": True},
+            {"name": "🎮 Game", "value": SELECTED_GAME_NAME or "Chưa chọn", "inline": True},
+            {"name": "📈 Thống kê", "value": f"**Rejoin:** {total_rejoin} lần\n**Uptime tool:** {fmt_duration(int(total_uptime))}", "inline": True},
+            {"name": "⚙️ Cơ chế", "value": get_rejoin_mode_str(), "inline": True},
+            {"name": "🌐 Mạng", "value": "🟢 Online" if is_online() else "🔴 Offline", "inline": True},
+            {"name": "🔁 Dự phòng", "value": f"Auto Backup: {'Bật' if AUTO_BACKUP else 'Tắt'}\nAuto Clear: {'Bật' if AUTO_CLEAR_DATA else 'Tắt'}", "inline": True},
+        ]
 
-        fields.append({
-            "name": "⏱️ Thời gian chạy",
-            "value": f"`{fmt_duration(int(total_uptime))}`",
-            "inline": True
-        })
-
-        fields.append({
-            "name": "🔄 Tổng rejoin",
-            "value": f"**{total_rejoin}** lần",
-            "inline": True
-        })
-
-        fields.append({
-            "name": "🎮 Game",
-            "value": f"{SELECTED_GAME_NAME or 'Chưa chọn'}",
-            "inline": True
-        })
-
-        mode_label = "Auto rejoin" if AUTO_REJOIN_MODE == 1 else f"Delay {DELAY_REJOIN_MINUTES}p"
-        fields.append({
-            "name": "⚙️ Cơ chế",
-            "value": mode_label,
-            "inline": True
-        })
-
-        net_status = "?? Online" if is_online() else "🔴 Offline"
-        fields.append({
-            "name": "🌐 Mạng",
-            "value": net_status,
-            "inline": True
-        })
-
-        if running_tabs:
-            tab_info = []
-            for pkg in running_tabs[:5]:
-                short = ALIASES.get(pkg) or pkg[len(PACKAGE_PREFIX):].lstrip(".")
-                status = "🟢" if (pkg in JOINED_AT and is_app_in_foreground(pkg)) else "🟡"
-                rj = REJOIN_COUNT.get(pkg, 0)
-                tab_info.append(f"{status} {short} (RJ: {rj})")
-
-            if tab_info:
-                fields.append({
-                    "name": "📱 Chi tiết tab",
-                    "value": "\n".join(tab_info),
-                    "inline": False
-                })
+        if not_ok:
+            lines = []
+            for pkg in not_ok[:6]:
+                short = ALIASES.get(pkg) or _short_pkg(pkg)
+                if pkg not in running_tabs:
+                    why = "tab đã tắt"
+                else:
+                    why = "đang chạy nhưng chưa vào Map"
+                lines.append(f"• `{short}` — {why}")
+            if len(not_ok) > 6:
+                lines.append(f"… và {len(not_ok) - 6} tab khác")
+            fields.append({"name": "⚠️ Tab cần chú ý", "value": "\n".join(lines), "inline": False})
 
         if GAME_STATUS_PAUSED:
-            fields.append({
-                "name": "⏸️ Trạng thái game",
-                "value": f"**Tạm dừng:** {clip(GAME_STATUS_REASON, 80)}",
-                "inline": False
-            })
-
-        if len(running_tabs) == 0:
-            embed_color = 0xFF0000
-        elif len(in_map_tabs) < len(running_tabs):
-            embed_color = 0xFFD700
-        else:
-            embed_color = 0x00FF00
+            fields.append({"name": "⏸️ Tạm dừng", "value": clip(GAME_STATUS_REASON, 200), "inline": False})
 
         embed_obj = {
-            "title": "📋 Báo cáo trạng thái định kỳ (5 phút)",
-            "description": f"Cập nhật tự động từ PAIN TOOL REJOIN VIP",
-            "color": embed_color,
+            "author": {
+                "name": f"{style['icon']} BÁO CÁO 5 PHÚT — {state}",
+                "icon_url": "https://i.postimg.cc/gJbhCmHL/Pain-Gamer.png",
+            },
+            "title": f"{len(running_tabs)}/{total} tab đang chạy • {SELECTED_GAME_NAME or 'Chưa chọn game'}",
+            "description": f"Cập nhật lúc **{datetime.now().strftime('%H:%M:%S %d/%m/%Y')}**",
+            "color": style["color"],
             "fields": fields,
-            "footer": {"text": f"MADE BY PAIN • {VERSION} | Auto-report every 5 min"},
+            "footer": {
+                "text": f"PAIN TOOL {VERSION} • Báo cáo định kỳ 5 phút",
+                "icon_url": "https://i.postimg.cc/gJbhCmHL/Pain-Gamer.png",
+            },
             "timestamp": datetime.now(timezone.utc).isoformat() + "Z",
         }
-
         return embed_obj
-
     except Exception as e:
         log_event("EMBED_ERR", detail=f"build_status_embed lỗi: {e}")
         return None
@@ -3195,7 +3240,7 @@ def send_periodic_report_with_shot(packages):
             json.dump(payload, f, ensure_ascii=False)
         if shot:
             args = ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", "-X", "POST", WEBHOOK_URL,
-                    "-F", f"payload_json=@{tmp_json};type=application/json",
+                    "-F", f"payload_json=<{tmp_json};type=application/json",
                     "-F", f"files[0]=@{shot};filename=screenshot.png"]
         else:
             args = ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", "-X", "POST", WEBHOOK_URL,
@@ -3270,6 +3315,8 @@ def send_periodic_status_embed(packages):
         log_event("PERIODIC_EMBED_ERR", detail=f"Gửi periodic embed lỗi: {e}")
 
 def get_all_packages():
+    if PACKAGE_MODE == "custom":
+        return list_installed_packages()
     output = run_cmd(["pm", "list", "packages"])
     packages = []
     for line in output.splitlines():
@@ -3280,13 +3327,34 @@ def get_all_packages():
     packages.sort()
     return packages if packages else [PACKAGE_PREFIX]
 
-def list_installed_packages():
+def _short_pkg(pkg):
+    """Tên ngắn hiển thị: bỏ prefix nếu có, không thì giữ nguyên package name."""
+    if PACKAGE_PREFIX and pkg.startswith(PACKAGE_PREFIX) and pkg != PACKAGE_PREFIX:
+        return pkg[len(PACKAGE_PREFIX):].lstrip(".") or pkg
+    return pkg
+
+def scan_prefix_packages():
+    """Quét máy theo PACKAGE_PREFIX (chỉ dùng cho Prefix Mode)."""
     out = run_cmd(["pm", "list", "packages"])
     pkgs = []
     for line in out.splitlines():
         if PACKAGE_PREFIX in line and ":" in line:
             pkgs.append(line.split(":", 1)[1].strip())
     return sorted(set(pkgs))
+
+def installed_package_set():
+    out = run_cmd(["pm", "list", "packages"])
+    return {ln.split(":", 1)[1].strip() for ln in out.splitlines() if ":" in ln}
+
+def list_installed_packages():
+    """Danh sách package đang dùng theo PACKAGE_MODE.
+    - prefix: quét theo PACKAGE_PREFIX
+    - custom: các package trong CUSTOM_PACKAGES có thật trên máy (giữ thứ tự nhập)
+    Mọi chức năng khác đều gọi hàm này để đồng bộ theo mode."""
+    if PACKAGE_MODE == "custom":
+        on_dev = installed_package_set()
+        return [p for p in CUSTOM_PACKAGES if p in on_dev]
+    return scan_prefix_packages()
 
 # ==================== ROOT / SHELL ====================
 _ROOT_MODE = "unknown"
@@ -3608,6 +3676,19 @@ def _crash_detail(pkg, base):
         detail = None
     return f"{base} | {detail}" if detail else base
 
+# Đếm ngược khi tab bị văng ra Lobby: hiển thị mỗi số, tick chậm hơn 1 chút (1.2s) để không rejoin quá nhanh
+LOBBY_COUNTDOWN_SEC = 5
+LOBBY_COUNTDOWN_TICK = 1.2
+
+def wait_with_stop_check_precise(seconds):
+    """Chờ `seconds` (có thể lẻ). Trả về True nếu bị dừng khẩn cấp."""
+    end = time.time() + seconds
+    while time.time() < end:
+        if stop_start:
+            return True
+        time.sleep(min(0.2, max(0.0, end - time.time())))
+    return stop_start
+
 def detect_problem(pkg):
     if stop_start:
         return None
@@ -3615,9 +3696,14 @@ def detect_problem(pkg):
         return _crash_detail(pkg, "Tab bị tắt Đa nhiệm / Game crash (không còn tiến trình)")
 
     if not is_app_in_foreground(pkg):
-        print(f"\033[1;33m[-] {tab_label(pkg)} bị thoát ra Màn hình chính/Lobby. Đang đếm ngược 5s...\033[0m")
-        if wait_with_stop_check(5):
-            return None
+        print(f"\033[1;33m[-] {tab_label(pkg)} bị thoát ra Màn hình chính/Lobby. Đếm ngược {LOBBY_COUNTDOWN_SEC}s...\033[0m")
+        print("\033[1;33m    Đếm ngược: \033[0m", end="", flush=True)
+        for sec in range(LOBBY_COUNTDOWN_SEC, 0, -1):
+            print(f"{sec}..", end=" ", flush=True)
+            if wait_with_stop_check_precise(LOBBY_COUNTDOWN_TICK):
+                print()
+                return None
+        print()
         if stop_start:
             return None
         if not is_app_running(pkg):
@@ -4308,7 +4394,9 @@ def preflight_items():
     items = []
     installed = list_installed_packages()
     if installed:
-        items.append(("ok", True, f"Tab clone: {len(installed)} tab"))
+        items.append(("ok", True, f"Tab clone ({'Custom List' if PACKAGE_MODE == 'custom' else 'prefix ' + PACKAGE_PREFIX}): {len(installed)} tab"))
+    elif PACKAGE_MODE == "custom":
+        items.append(("fail", True, "Custom Package List không có package nào có trên máy"))
     else:
         items.append(("fail", True, f"Không có tab clone nào (prefix: {PACKAGE_PREFIX})"))
 
@@ -4786,7 +4874,8 @@ def start_tool():
     _HOP_PAUSE_UNTIL = 0
 
     print(f"\033[1;37m[+] PAIN TOOL REJOIN VIP ({VERSION}) Đang chạy...\033[0m")
-    print(f"\033[1;32m[*] Đã tìm thấy {len(packages)} bản clone ({PACKAGE_PREFIX}).\033[0m")
+    _src = "Custom Package List" if PACKAGE_MODE == "custom" else f"prefix {PACKAGE_PREFIX}"
+    print(f"\033[1;32m[*] Đã tìm thấy {len(packages)} bản clone ({_src}).\033[0m")
     print(f"\033[1;32m[*] Cơ chế Rejoin: {get_rejoin_mode_str()}\033[0m")
     if not TARGET_LINK:
         print("\033[1;31m[!] Chưa chọn game (Set up > Chọn game): tool chỉ mở app, không vào Map.\033[0m")
@@ -5419,7 +5508,7 @@ def menu_vip_servers():
             print(f" {C.GRY}(chưa có VIP server nào, khi cần đổi tool sẽ chọn Public server ít người){C.R}")
         print(f" {C.GRY}Đã có {len(VIP_SERVERS)}/{MAX_VIP_SERVERS}. Dán link VIP server của game (https://www.roblox.com/... hoặc roblox://...).{C.R}")
         print(f"{C.LPUR}[1]{C.R} {C.WHT}Thêm link VIP server{C.R}")
-        print(f"{C.LPUR}[2]{C.R} {C.WHT}Xóa link (theo số thứ tự){C.R}")
+        print(f"{C.LPUR}[2]{C.R} {C.WHT}Xóa link{C.R}")
         print(f"{C.RED}[0] Quay lại{C.R}")
         sub = input("Chọn: ").strip()
         if sub == "0":
@@ -5468,7 +5557,7 @@ def menu_server_hop():
     print(f" lần mà vẫn lag thì tool tạm dừng 30 phút vì lỗi nhiều khả năng ở mạng của máy.{C.R}")
     print(f"{C.LPUR}[1]{C.R} {C.WHT}Bật{C.R}")
     print(f"{C.LPUR}[2]{C.R} {C.WHT}Tắt{C.R}")
-    print(f"{C.LPUR}[3]{C.R} {C.WHT}Đổi ngưỡng độ trễ (200-2000 ms){C.R}")
+    print(f"{C.LPUR}[3]{C.R} {C.WHT}Ngưỡng độ trễ (ms){C.R}")
     print(f"{C.LPUR}[4]{C.R} {C.WHT}Quản lý danh sách VIP server{C.R}")
     print(f"{C.LPUR}[5]{C.R} {C.WHT}Đo độ trễ tới Roblox ngay{C.R}")
     print(f"{C.RED}[0] Quay lại{C.R}")
@@ -5572,7 +5661,7 @@ def show_banner():
         package_prefix = globals().get('PACKAGE_PREFIX', '')
         _pkg_val = f"{dot(n_tabs > 0)} {C.WHT}Prefix Mode{C.R} {C.GRY}│ {clip(package_prefix, vw - 18)} ({n_tabs} tab){C.R}"
     else:
-        _pkg_val = f"{dot(n_tabs > 0)} {C.WHT}Custom Mode{C.R} {C.GRY}│ {len(globals().get('CUSTOM_PACKAGES', []))} packages ({n_tabs} tab){C.R}"
+        _pkg_val = f"{dot(n_tabs > 0)} {C.WHT}Custom Mode{C.R} {C.GRY}│ {len(globals().get('CUSTOM_PACKAGES', []))} package{C.R}"
     print(box_kv("Package", _pkg_val, w, lw))
     print(box_kv("Rejoin", f"{dot(True)} {C.WHT}{clip(get_rejoin_mode_str(), vw - 2)}{C.R}", w, lw))
     auto_clear = globals().get('AUTO_CLEAR_DATA')
@@ -5607,36 +5696,31 @@ def show_banner():
         ("2", "Set up"),
         ("3", "Set up package"),
         ("4", "Change ID"),
-        ("5", "Set Webhook URL"),
+        ("5", "Webhook URL"),
         ("6", "Xóa cache"),
         ("7", "Import auto execute"),
         ("8", "Mở tab clone"),
         ("9", "Send Text"),
-        ("10", "Backup / Restore"),
+        ("10", "Backup"),
         ("11", "Cookie Roblox"),
         ("12", "Xem log"),
-        ("13", "Thống kê độ ổn định"),
+        ("13", "Thống kê"),
         ("14", "Hồ sơ theo game"),
-        ("15", "Gán executor cho tab"),
+        ("15", "Gán executor"),
         ("16", "Ban Tracking Stats"),
         ("17", "Anti-AFK"),
-        ("18", "Nghe nhạc YouTube"),
+        ("18", "Nghe nhạc"),
         ("19", "Dừng khẩn cấp"),
-        ("20", "Tự động start khi khởi động"),
+        ("20", "Tự động start"),
         ("0", "Exit"),
     ]
 
-    def cell(entry, width):
-        k, label = entry
-        kc = C.RED if k == "0" else (C.GRN if k == "1" else C.LPUR)
-        lc = C.RED if k == "0" else C.WHT
-        return f"{kc}{pad('[' + k + ']', 4)}{C.R} {lc}{clip(label, width - 5)}{C.R}"
-
-    colw = inner // 2
-    half = (len(entries) + 1) // 2
-    for i in range(half):
-        right = cell(entries[i + half], inner - colw) if i + half < len(entries) else ""
-        print(box_row(pad(cell(entries[i], colw), colw) + right, w))
+    # Bố cục giống mục SET UP: một cột, mỗi dòng [n] + tên, thoát ở cuối bằng màu đỏ
+    for k, label in entries:
+        if k == "0":
+            continue
+        print(f" {C.LPUR}[{k}]{C.R} {C.WHT}{clip(label, w - 8)}{C.R}")
+    print(f" {C.RED}[0] {dict(entries)['0']}{C.R}")
     print(box_bot(w))
 
 # ==================== MENU SET UP / BACKUP ====================
@@ -5645,7 +5729,7 @@ def setup_auto_rejoin():
     clear_screen()
     section_title("SET UP AUTO REJOIN")
     print(f"{C.LPUR}[1]{C.R} {C.WHT}Auto rejoin vang/crash{C.R}")
-    print(f"{C.LPUR}[2]{C.R} {C.WHT}Delay rejoin (Hết chu kỳ tự tắt Đa nhiệm rồi vào lại Map){C.R}")
+    print(f"{C.LPUR}[2]{C.R} {C.WHT}Delay rejoin{C.R}")
     mode = input("Chọn cơ chế [1/2]: ").strip()
     if mode == "1":
         AUTO_REJOIN_MODE = 1
@@ -6008,7 +6092,7 @@ def pick_login_package():
             tag = f" {C.GRY}← {acc}{C.R}" if acc else ""
             print(f"  {C.LPUR}{i:>2}.{C.R} {C.WHT}{p}{C.R}{' (' + ALIASES[p] + ')' if ALIASES.get(p) else ''}{tag}")
     else:
-        msg_err(f"Không thấy package nào khớp '{PACKAGE_PREFIX}' (đổi ở mục [3] nếu clone đặt tên khác).")
+        msg_err("Custom Package List không có package nào trên máy (thêm ở Set up package → Package mode)." if PACKAGE_MODE == "custom" else f"Không thấy package nào khớp '{PACKAGE_PREFIX}' (đổi ở mục [3] nếu clone đặt tên khác).")
     while True:
         raw = ask("Nhập package name cần đăng nhập (Enter để bỏ qua):").strip()
         if not raw:
@@ -6085,7 +6169,7 @@ def cookie_login_submenu():
         print(f" {C.LPUR}[1]{C.R} {C.WHT}Dán cookie trực tiếp{C.R}")
         print(f" {C.LPUR}[2]{C.R} {C.WHT}Đọc từ file{C.R} {C.GRY}(mỗi dòng 1 cookie){C.R}")
         print(f" {C.LPUR}[3]{C.R} {C.WHT}Lấy từ clipboard{C.R} {C.GRY}(cần Termux:API){C.R}")
-        print(f" {C.LPUR}[4]{C.R} {C.WHT}Batch auto{C.R} {C.GRY}(N cookie → N tab tự động theo thứ tự){C.R}")
+        print(f" {C.LPUR}[4]{C.R} {C.WHT}Batch auto{C.R}")
         print(f" {C.RED}[0] Quay lại{C.R}")
         print()
         sub = ask("Chọn:").strip()
@@ -6279,10 +6363,18 @@ def get_cookie_account():
 
     print(f"{C.GRY}Lấy .ROBLOSECURITY từ package Roblox trên thiết bị{C.R}\n")
 
-    # Lấy danh sách package để quét
+    if not root_mode():
+        msg_err("Cần quyền root để đọc dữ liệu riêng của các tab Roblox.")
+        wait_enter()
+        return
+
+    # Lấy danh sách package để quét (theo mode hiện tại)
     pool = list_installed_packages()
     if not pool:
-        msg_err(f"Không tìm thấy package nào (prefix: {PACKAGE_PREFIX}).")
+        if PACKAGE_MODE == "custom":
+            msg_err("Custom Package List không có package nào trên máy.")
+        else:
+            msg_err(f"Không tìm thấy package nào khớp '{PACKAGE_PREFIX}'.")
         wait_enter()
         return
     packages_to_check = [p for p in SELECTED_PACKAGES if p in pool] if SELECTED_PACKAGES else pool
@@ -6292,12 +6384,12 @@ def get_cookie_account():
     for pkg in sorted(packages_to_check):
         print(f"{C.GRY}Kiểm tra {pkg}...{C.R}")
 
-        # Try WebView DB first
-        found_cookies, reason = _read_cookies_from_webview_db(pkg)
-
-        # Fallback to prefs
-        if not found_cookies or COOKIE_NAME not in found_cookies:
-            found_cookies, reason = _read_cookies_from_prefs(pkg)
+        # Thử CSDL WebView trước, rồi shared_prefs; giữ lý do của cả hai để báo đúng nguyên nhân
+        found_cookies, reason1 = _read_cookies_from_webview_db(pkg)
+        reason = reason1
+        if COOKIE_NAME not in found_cookies:
+            found_cookies, reason2 = _read_cookies_from_prefs(pkg)
+            reason = f"{reason1 or ''} | {reason2 or ''}".strip(" |")
 
         if COOKIE_NAME in found_cookies:
             cookie = found_cookies[COOKIE_NAME]
@@ -6312,10 +6404,11 @@ def get_cookie_account():
             cookies_found.append((pkg, cookie, status))
             print(f"  {status}\n")
         else:
-            print(f"  {C.RED}✗ Không tìm thấy cookie{C.R}\n")
+            print(f"  {C.RED}✗ Không tìm thấy cookie{C.R}")
+            print(f"    {C.GRY}Lý do: {reason}{C.R}\n")
 
     if not cookies_found:
-        msg_err("Không tìm thấy cookie nào trong các package đang chạy.")
+        msg_err("Không lấy được cookie nào. Xem lý do ở từng package phía trên.")
         wait_enter()
         return
 
@@ -6330,10 +6423,13 @@ def get_cookie_account():
         print(f"    {cookie_preview(cookie)}\n")
 
     def _copy_to_clipboard(text):
-        """Copy text dùng termux-clipboard-set (Android)"""
+        """Copy text dùng termux-clipboard-set (Android). Trả về False nếu không copy được."""
+        if not shutil.which("termux-clipboard-set"):
+            return False
         try:
-            run_cmd(["termux-clipboard-set", text], timeout=5)
-            return True
+            res = subprocess.run(["termux-clipboard-set", text], capture_output=True,
+                                 timeout=8, stdin=subprocess.DEVNULL)
+            return res.returncode == 0
         except Exception:
             return False
 
@@ -6424,12 +6520,10 @@ def menu_cookie_roblox():
         
         print(f"{C.GRY}Quản lý cookie Roblox cho các tab clone của bạn{C.R}\n")
         
-        print(f"{C.LPUR}[1]{C.R} {C.WHT}Đăng Nhập Cookie Roblox{C.R}")
-        print(f"    → Nhập cookie để đăng nhập tài khoản vào tab clone")
-        print(f"    → Hỗ trợ: dán trực tiếp, đọc file, clipboard\n")
+        print(f"{C.LPUR}[1]{C.R} {C.WHT}Đăng nhập cookie{C.R}")
+        print()
         
-        print(f"{C.LPUR}[2]{C.R} {C.WHT}Lấy Cookie Account Roblox{C.R}")
-        print(f"    → Trích xuất cookie từ package Roblox trên thiết bị")
+        print(f"{C.LPUR}[2]{C.R} {C.WHT}Lấy cookie account{C.R}")
         
         print(f"{C.RED}[0] Quay lại menu chính{C.R}\n")
         
@@ -6501,9 +6595,9 @@ def menu_anti_afk():
             print(f"\n {C.YEL}Máy chưa có root: chức năng này không gửi được thao tác.{C.R}")
         print(f"\n{C.LPUR}[1]{C.R} {C.WHT}Bật{C.R}")
         print(f"{C.LPUR}[2]{C.R} {C.WHT}Tắt{C.R}")
-        print(f"{C.LPUR}[3]{C.R} {C.WHT}Đổi chế độ (vuốt nhẹ / chạm){C.R}")
-        print(f"{C.LPUR}[4]{C.R} {C.WHT}Thử ngay (gửi một thao tác bây giờ){C.R}")
-        print(f"{C.LPUR}[5]{C.R} {C.WHT}Thống kê 7 ngày (Anti-AFK, đổi server, hẹn giờ nhạc){C.R}")
+        print(f"{C.LPUR}[3]{C.R} {C.WHT}Đổi chế độ{C.R}")
+        print(f"{C.LPUR}[4]{C.R} {C.WHT}Thử ngay{C.R}")
+        print(f"{C.LPUR}[5]{C.R} {C.WHT}Thống kê 7 ngày{C.R}")
         print(f"{C.RED}[0] Quay lại{C.R}\n")
         sub = ask("Chọn:").strip()
         if sub == "0":
@@ -7134,7 +7228,7 @@ def setup_low_ram():
     print(f"{C.LPUR}[1]{C.R} {C.WHT}Bật cảnh báo{C.R}")
     print(f"{C.LPUR}[2]{C.R} {C.WHT}Tắt cảnh báo{C.R}")
     print(f"{C.LPUR}[3]{C.R} {C.WHT}Đổi ngưỡng RAM (MB){C.R}")
-    print(f"{C.LPUR}[4]{C.R} {C.WHT}Bật / Tắt tự dọn cache khi RAM thấp{C.R}")
+    print(f"{C.LPUR}[4]{C.R} {C.WHT}Tự dọn cache khi RAM thấp{C.R}")
     print(f"{C.RED}[0] Quay lại{C.R}")
     sub = input("Chọn: ").strip()
     if sub == "1":
@@ -7177,7 +7271,7 @@ def menu_profile():
         else:
             print(f" {C.GRY}Chưa có profile nào.{C.R}")
         print(f" {C.GRY}Hiện tại: {clip(profile_summary(profile_snapshot()), 46)}{C.R}\n")
-        print(f"{C.LPUR}[1]{C.R} {C.WHT}Lưu cấu hình hiện tại thành profile{C.R}")
+        print(f"{C.LPUR}[1]{C.R} {C.WHT}Lưu thành profile{C.R}")
         print(f"{C.LPUR}[2]{C.R} {C.WHT}Nạp profile (đổi nhanh){C.R}")
         print(f"{C.LPUR}[3]{C.R} {C.WHT}Xóa profile{C.R}")
         print(f"{C.RED}[0] Quay lại{C.R}")
@@ -7273,7 +7367,7 @@ def menu_alias():
         section_title("BIỆT DANH TAB (ALIAS)")
         packages = list_installed_packages()
         if not packages:
-            msg_err(f"Không thấy package nào khớp '{PACKAGE_PREFIX}' (đổi ở mục [3] nếu clone đặt tên khác).")
+            msg_err("Custom Package List không có package nào trên máy (thêm ở Set up package → Package mode)." if PACKAGE_MODE == "custom" else f"Không thấy package nào khớp '{PACKAGE_PREFIX}' (đổi ở mục [3] nếu clone đặt tên khác).")
             wait_enter()
             return
         for i, p in enumerate(packages, 1):
@@ -7434,8 +7528,8 @@ def menu_auto_restart():
         print(f"{C.LPUR}[2]{C.R} {C.WHT}Mỗi 2 giờ{C.R}")
         print(f"{C.LPUR}[3]{C.R} {C.WHT}Mỗi 3 giờ{C.R}")
         print(f"{C.LPUR}[4]{C.R} {C.WHT}Mỗi 4 giờ{C.R}")
-        print(f"{C.LPUR}[5]{C.R} {C.WHT}Hành động: chỉ dọn RAM + cache{C.R}")
-        print(f"{C.LPUR}[6]{C.R} {C.WHT}Hành động: reset toàn bộ tab (tắt Đa nhiệm + vào lại Map){C.R}")
+        print(f"{C.LPUR}[5]{C.R} {C.WHT}Chỉ dọn RAM + cache{C.R}")
+        print(f"{C.LPUR}[6]{C.R} {C.WHT}Reset toàn bộ tab{C.R}")
         print(f"{C.RED}[0] Quay lại{C.R}")
         sub = input("Chọn: ").strip()
         if sub == "1":
@@ -7550,10 +7644,10 @@ def menu_low_graphics():
         section_title("GRAPHICS OPTIMIZER")
         print(f"Cài đặt: {C.WHT}{gfx_settings_label()}{C.R}   Tự áp dụng khi Start: {C.WHT}{'Bật' if GFX_AUTO else 'Tắt'}{C.R}")
         print(f" {C.GRY}Sửa file {GFX_FILE} của từng tab. Tab đang chạy sẽ bị tắt để áp dụng.{C.R}")
-        print(f"{C.LPUR}[1]{C.R} {C.WHT}Áp dụng ngay cho tất cả tab{C.R}")
+        print(f"{C.LPUR}[1]{C.R} {C.WHT}Áp dụng tất cả tab{C.R}")
         print(f"{C.LPUR}[2]{C.R} {C.WHT}Đồ họa thấp nhất [{'Bật' if GFX_LOW else 'Tắt'}]{C.R}")
         print(f"{C.LPUR}[3]{C.R} {C.WHT}Giới hạn FPS [{GFX_FPS if GFX_FPS else 'Không giới hạn'}]{C.R}")
-        print(f"{C.LPUR}[4]{C.R} {C.WHT}Khôi phục cài đặt gốc (tất cả tab){C.R}")
+        print(f"{C.LPUR}[4]{C.R} {C.WHT}Khôi phục gốc{C.R}")
         print(f"{C.LPUR}[5]{C.R} {C.WHT}Xem trạng thái các tab{C.R}")
         print(f"{C.LPUR}[6]{C.R} {C.WHT}Tự áp dụng khi Start [{'Bật' if GFX_AUTO else 'Tắt'}]{C.R}")
         print(f"{C.RED}[0] Quay lại{C.R}")
@@ -7939,7 +8033,7 @@ def menu_log_level(entries):
     clear_screen()
     section_title("LỌC LOG THEO MỨC ĐỘ")
     for key, (label, kinds) in LOG_LEVELS.items():
-        print(f"{C.LPUR}[{key}]{C.R} {C.WHT}{label}{C.R} {C.GRY}({len(filter_log(entries, 'level', kinds))} dòng){C.R}")
+        print(f"{C.LPUR}[{key}]{C.R} {C.WHT}{label}{C.R}")
     print(f"{C.RED}[0] Quay lại{C.R}\n")
     sub = input("Chọn: ").strip()
     if sub in LOG_LEVELS:
@@ -8018,17 +8112,17 @@ def menu_view_log():
         if _hint:
             print(f" {_hint}")
         print(f"{C.LPUR}[1]{C.R} {C.WHT}Xem log mới nhất{C.R}")
-        print(f"{C.LPUR}[2]{C.R} {C.WHT}Chỉ xem lỗi (Kick / Crash / Treo / Lobby / Rejoin thất bại...){C.R}")
-        print(f"{C.LPUR}[3]{C.R} {C.WHT}Phiên chạy gần nhất (từ lần Start cuối){C.R}")
+        print(f"{C.LPUR}[2]{C.R} {C.WHT}Chỉ xem lỗi{C.R}")
+        print(f"{C.LPUR}[3]{C.R} {C.WHT}Phiên chạy gần nhất{C.R}")
         print(f"{C.LPUR}[4]{C.R} {C.WHT}Lọc theo tab{C.R}")
         print(f"{C.LPUR}[5]{C.R} {C.WHT}Tìm theo từ khóa / mã lỗi{C.R}")
         print(f"{C.LPUR}[6]{C.R} {C.WHT}Xóa toàn bộ log{C.R}")
         print(f"{C.LPUR}[7]{C.R} {C.WHT}Tra mã lỗi Roblox{C.R}")
         print(f"{C.LPUR}[8]{C.R} {C.WHT}Gói báo lỗi đã lưu{C.R}")
-        print(f"{C.LPUR}[9]{C.R} {C.WHT}Lọc theo mức độ (lỗi / cảnh báo / thành công / thông tin){C.R}")
-        print(f"{C.LPUR}[10]{C.R} {C.WHT}Xuất log theo ngày ra file văn bản{C.R}")
+        print(f"{C.LPUR}[9]{C.R} {C.WHT}Lọc theo mức độ{C.R}")
+        print(f"{C.LPUR}[10]{C.R} {C.WHT}Xuất log theo ngày{C.R}")
         print(f"{C.LPUR}[11]{C.R} {C.WHT}Hỏi AI về log{C.R}")
-        print(f"{C.LPUR}[12]{C.R} {C.WHT}Phân loại lỗi 7 ngày (gom nhóm, AI đặt tên nguyên nhân){C.R}")
+        print(f"{C.LPUR}[12]{C.R} {C.WHT}Phân loại lỗi 7 ngày{C.R}")
         print(f"{C.LPUR}[r]{C.R} {C.WHT}Xem lại bộ lọc vừa dùng{C.R}")
         print(f"{C.RED}[0] Quay lại menu chính{C.R}")
         sub = input("Chọn: ").strip()
@@ -8406,10 +8500,10 @@ def print_script_preview(text):
 
 def _lib_add_script():
     print(f"\n{C.WHT}Thêm script mới{C.R}\n")
-    print(f"{C.LPUR}[1]{C.R} {C.WHT}Dán trực tiếp (nhiều dòng){C.R}")
+    print(f"{C.LPUR}[1]{C.R} {C.WHT}Dán trực tiếp{C.R}")
     print(f"{C.LPUR}[2]{C.R} {C.WHT}Đọc từ file .lua{C.R}")
-    print(f"{C.LPUR}[3]{C.R} {C.WHT}Từ clipboard (cần Termux:API){C.R}")
-    print(f"{C.LPUR}[4]{C.R} {C.WHT}Từ URL (raw GitHub, link raw của scriptblox){C.R}")
+    print(f"{C.LPUR}[3]{C.R} {C.WHT}Từ clipboard{C.R}")
+    print(f"{C.LPUR}[4]{C.R} {C.WHT}Từ URL{C.R}")
     print(f"{C.RED}[0] Quay lại{C.R}\n")
     how = ask("Chọn:").strip()
     if how == "0":
@@ -8477,7 +8571,7 @@ def _lib_script_menu(idx):
         print(f"{C.LPUR}[3]{C.R} {C.WHT}Đổi tên{C.R}")
         print(f"{C.LPUR}[4]{C.R} {C.WHT}Bật / tắt{C.R}")
         print(f"{C.LPUR}[5]{C.R} {C.WHT}Xóa script{C.R}")
-        print(f"{C.LPUR}[6]{C.R} {C.WHT}Xem trước và kiểm tra rủi ro{C.R}")
+        print(f"{C.LPUR}[6]{C.R} {C.WHT}Xem trước & kiểm tra{C.R}")
         print(f"{C.RED}[0] Quay lại{C.R}\n")
         sub = ask("Chọn:").strip()
         if sub == "0":
@@ -8596,7 +8690,7 @@ def _lib_assign():
             print(f"{C.LPUR}[2]{C.R} {C.WHT}Thêm từ danh sách game{C.R}")
             print(f"{C.LPUR}[3]{C.R} {C.WHT}Thêm bằng ID / link tùy ý{C.R}")
             print(f"{C.LPUR}[4]{C.R} {C.WHT}Gỡ 1 game khỏi danh sách{C.R}")
-            print(f"{C.LPUR}[5]{C.R} {C.WHT}Bỏ gán (áp dụng cho mọi game){C.R}")
+            print(f"{C.LPUR}[5]{C.R} {C.WHT}Bỏ gán{C.R}")
             print(f"{C.RED}[0] Quay lại{C.R}\n")
             sub = ask("Chọn:").strip()
             changed = False
@@ -8787,7 +8881,7 @@ def menu_autoexec_pro():
         clear_screen()
         section_title("IMPORT AUTO EXECUTE")
         print(f"{C.LPUR}[1]{C.R} {C.WHT}Thêm script mới{C.R}")
-        print(f"{C.LPUR}[2]{C.R} {C.WHT}Quản lý script (sửa / xóa / bật tắt){C.R}")
+        print(f"{C.LPUR}[2]{C.R} {C.WHT}Quản lý script{C.R}")
         print(f"{C.LPUR}[3]{C.R} {C.WHT}Gán script cho game{C.R}")
         print(f"{C.LPUR}[4]{C.R} {C.WHT}Sync sang executor / tab{C.R}")
         print(f"{C.LPUR}[5]{C.R} {C.WHT}Kiểm tra syntax Lua{C.R}")
@@ -8830,7 +8924,7 @@ def menu_game_profiles():
 
         print(f"{C.LPUR}[1]{C.R} {C.WHT}Tạo/Sửa hồ sơ game{C.R}")
         print(f"{C.LPUR}[2]{C.R} {C.WHT}Xóa hồ sơ game{C.R}")
-        print(f"{C.LPUR}[3]{C.R} {C.WHT}Sao chép hồ sơ từ game khác{C.R}")
+        print(f"{C.LPUR}[3]{C.R} {C.WHT}Sao chép từ game khác{C.R}")
         print(f"\033[1;32m0. Quay lại menu chính{C.R}")
         sub = input("Chọn: ").strip()
 
@@ -8948,7 +9042,7 @@ def menu_executor_binding():
 
         print(f" {C.WHT}Tab hiện tại và executor được gán:{C.R}")
         for i, pkg in enumerate(packages, 1):
-            short = ALIASES.get(pkg) or pkg[len(PACKAGE_PREFIX):].lstrip(".") if pkg.startswith(PACKAGE_PREFIX) else pkg
+            short = ALIASES.get(pkg) or _short_pkg(pkg)
             exe = EXECUTOR_BINDING.get(pkg, "—")
             exe_display = exe if exe in EXECUTOR_NAMES else "—"
             print(f"  {C.LPUR}{i:>2}.{C.R} {C.WHT}{short:20}{C.R} → {C.YEL}{exe_display}{C.R}")
@@ -8986,7 +9080,7 @@ def menu_executor_binding():
         exe = EXECUTOR_NAMES[exe_idx]
         EXECUTOR_BINDING[pkg] = exe
 
-        short = ALIASES.get(pkg) or pkg[len(PACKAGE_PREFIX):].lstrip(".") if pkg.startswith(PACKAGE_PREFIX) else pkg
+        short = ALIASES.get(pkg) or _short_pkg(pkg)
         msg_done(f"Đã gán {exe} cho tab: {short}")
         save_config_file()
         wait_enter()
@@ -8996,22 +9090,22 @@ MENU_NAMES = {
     "2": "Thiết lập cơ bản", 
     "3": "Thiết lập prefix package", 
     "4": "Thay đổi ID", 
-    "5": "Thiết lập Webhook URL",
+    "5": "Webhook URL",
     "6": "Xóa cache", 
     "7": "Import Auto Execute", 
     "8": "Mở tab clone", 
     "9": "Gửi tin nhắn",
-    "10": "Sao lưu / Khôi phục dữ liệu", 
+    "10": "Backup", 
     "11": "Cookie Roblox", 
     "12": "Xem log",
-    "13": "Thống kê độ ổn định", 
+    "13": "Thống kê", 
     "14": "Hồ sơ theo game", 
-    "15": "Gán executor cho tab",
+    "15": "Gán executor",
     "16": "Ban Tracking Stats", 
     "17": "Anti-AFK",
-    "18": "Nghe nhạc YouTube",
+    "18": "Nghe nhạc",
     "19": "Dừng khẩn cấp",
-    "20": "Tự động start khi khởi động",
+    "20": "Tự động start",
     "0": "Thoát",
 }
 
@@ -9473,7 +9567,7 @@ def menu_choose_game_with_package():
 
     print(f"{C.WHT}Danh sách package:{C.R}")
     for i, pkg in enumerate(packages, 1):
-        short = pkg[len(PACKAGE_PREFIX):].lstrip(".") if pkg.startswith(PACKAGE_PREFIX) else pkg
+        short = _short_pkg(pkg)
         alias = ALIASES.get(pkg, "")
         alias_str = f" ({alias})" if alias else ""
         print(f"  {C.WHT}{i:2}. {short}{alias_str}{C.R}")
@@ -9495,7 +9589,7 @@ def menu_choose_game_with_package():
             "game_name": game_name,
             "game_id": game_id,
         }
-        short = pkg[len(PACKAGE_PREFIX):].lstrip(".") if pkg.startswith(PACKAGE_PREFIX) else pkg
+        short = _short_pkg(pkg)
         msg_done(f"✓ Đã liên kết '{game_name}' với {C.WHT}{short}{C.R}")
     else:
         msg_err("Lựa chọn không hợp lệ.")
@@ -9526,15 +9620,15 @@ def menu_key_injector():
         print(f" {C.GRY}Bản sao nằm ở {KEY_VAULT_DIR} (quyền riêng tư), không gửi lên Discord / log.{C.R}")
         print(f" {C.GRY}Tự động lưu & chèn: {'BẬT' if KEY_AUTO else 'TẮT'}{C.R}\n")
         if not packages:
-            msg_err(f"Không thấy package nào khớp '{PACKAGE_PREFIX}' (đổi ở mục [3] nếu clone đặt tên khác).")
+            msg_err("Custom Package List không có package nào trên máy (thêm ở Set up package → Package mode)." if PACKAGE_MODE == "custom" else f"Không thấy package nào khớp '{PACKAGE_PREFIX}' (đổi ở mục [3] nếu clone đặt tên khác).")
             wait_enter()
             return
         for i, p in enumerate(packages, 1):
             print(f" {C.LPUR}{i:>2}.{C.R} {C.WHT}{clip(tab_label(p), 30)}{C.R} {C.GRY}theo dõi {len(KEY_FILES.get(p, []))} file · vault {len(idx.get(p, {}))} file{C.R}")
-        print(f"{C.LPUR}[1]{C.R} {C.WHT}Chọn file key cần giữ cho 1 tab (tự quét){C.R}")
-        print(f"{C.LPUR}[2]{C.R} {C.WHT}Lưu key vào vault ngay (mọi tab đã chọn){C.R}")
-        print(f"{C.LPUR}[3]{C.R} {C.WHT}Chèn key từ vault ngay (ghi đè, tab sẽ bị tắt){C.R}")
-        print(f"{C.LPUR}[4]{C.R} {C.WHT}Bật / Tắt tự động lưu & chèn{C.R}")
+        print(f"{C.LPUR}[1]{C.R} {C.WHT}Chọn file key giữ cho 1 tab{C.R}")
+        print(f"{C.LPUR}[2]{C.R} {C.WHT}Lưu key vào vault ngay{C.R}")
+        print(f"{C.LPUR}[3]{C.R} {C.WHT}Chèn key từ vault ngay{C.R}")
+        print(f"{C.LPUR}[4]{C.R} {C.WHT}Tự động lưu & chèn{C.R}")
         print(f"{C.LPUR}[5]{C.R} {C.WHT}Xóa vault của 1 tab{C.R}")
         print(f"{C.RED}[0] Quay lại menu Set up{C.R}")
         sub = input("Chọn: ").strip()
@@ -9688,9 +9782,9 @@ def menu_screen_guard():
         print(f" {C.GRY}• Trắng/đen kẹt {WB_CONFIRM_COUNT} lần liên tiếp -> kill-process rồi vào lại ngay, không chờ timeout.{C.R}")
         print(f" {C.GRY}• Not Responding (ANR) hoặc khung hình đứng im {OVERLAY_FREEZE_SEC}s + không có log -> kill-process rồi chạy lại.{C.R}")
         print(f" {C.GRY}Hiện tại: {screen_guard_label()}{C.R}\n")
-        print(f"{C.LPUR}[1]{C.R} {C.WHT}Bật / Tắt phát hiện màn hình trắng/đen [{'Bật' if WB_DETECT else 'Tắt'}]{C.R}")
-        print(f"{C.LPUR}[2]{C.R} {C.WHT}Bật / Tắt phát hiện Not Responding / GUI đứng [{'Bật' if OVERLAY_DETECT else 'Tắt'}]{C.R}")
-        print(f"{C.LPUR}[3]{C.R} {C.WHT}Thử quét ngay (xem tool đọc màn hình từng tab){C.R}")
+        print(f"{C.LPUR}[1]{C.R} {C.WHT}Màn hình trắng/đen [{'Bật' if WB_DETECT else 'Tắt'}]{C.R}")
+        print(f"{C.LPUR}[2]{C.R} {C.WHT}Not Responding / GUI đứng [{'Bật' if OVERLAY_DETECT else 'Tắt'}]{C.R}")
+        print(f"{C.LPUR}[3]{C.R} {C.WHT}Thử quét ngay{C.R}")
         print(f"{C.RED}[0] Quay lại menu Set up{C.R}")
         sub = input("Chọn: ").strip()
         if sub == "0":
@@ -9766,7 +9860,7 @@ def menu_stop_timer():
         print(f"{C.GRY}Tính từ lúc bấm Start. Khi hết giờ tool dừng rejoin và gửi tin lên webhook.{C.R}\n")
         print(f"{C.LPUR}[1]{C.R} {C.WHT}Bật và đặt số giờ{C.R}")
         print(f"{C.LPUR}[2]{C.R} {C.WHT}Tắt{C.R}")
-        print(f"{C.LPUR}[3]{C.R} {C.WHT}Bật/tắt tắt clone khi hết giờ{C.R}")
+        print(f"{C.LPUR}[3]{C.R} {C.WHT}Tắt clone khi hết giờ{C.R}")
         print(f"{C.RED}[0] Quay lại{C.R}\n")
         sub = ask("Chọn:").strip()
         if sub == "1":
@@ -10014,7 +10108,7 @@ def menu_config_io():
         section_title("SET UP CẤU HÌNH")
         print(f"{C.LPUR}[1]{C.R} {C.WHT}Xuất cấu hình ra file{C.R}")
         print(f"{C.LPUR}[2]{C.R} {C.WHT}Nhập cấu hình từ file{C.R}")
-        print(f"{C.LPUR}[3]{C.R} {C.WHT}Reset cấu hình về mặc định{C.R}")
+        print(f"{C.LPUR}[3]{C.R} {C.WHT}Reset cấu hình{C.R}")
         print(f"{C.RED}[0] Quay lại{C.R}\n")
         sub = ask("Chọn:").strip()
         if sub == "1":
@@ -10032,28 +10126,28 @@ def menu_setup():
     while True:
         clear_screen()
         section_title("SET UP")
-        print(f"{C.LPUR}[1]{C.R} {C.WHT}Set up auto rejoin{C.R}")
+        print(f"{C.LPUR}[1]{C.R} {C.WHT}Auto rejoin{C.R}")
         print(f"{C.LPUR}[2]{C.R} {C.WHT}Chọn game{C.R}")
-        print(f"{C.LPUR}[3]{C.R} {C.WHT}Auto Clear Data / Khôi phục tab kẹt [{'Bật' if AUTO_CLEAR_DATA else 'Tắt'}]{C.R}")
-        print(f"{C.LPUR}[4]{C.R} {C.WHT}Auto Backup data tab [{'Bật' if AUTO_BACKUP else 'Tắt'}]{C.R}")
-        print(f"{C.LPUR}[5]{C.R} {C.WHT}Cảnh báo RAM thấp [{'Bật' if LOW_RAM_ALERT else 'Tắt'}]{C.R}")
-        print(f"{C.LPUR}[6]{C.R} {C.WHT}Profile cấu hình [{len(PROFILES)} profile]{C.R}")
-        print(f"{C.LPUR}[7]{C.R} {C.WHT}Tìm kiếm package (chạm để copy){C.R}")
-        print(f"{C.LPUR}[8]{C.R} {C.WHT}Hẹn giờ tự chạy / tự dừng [{'Bật' if (SCHEDULE.get('start') or SCHEDULE.get('stop')) else 'Tắt'}]{C.R}")
-        print(f"{C.LPUR}[9]{C.R} {C.WHT}Graphics Optimizer (đồ họa thấp + giới hạn FPS) [{gfx_settings_label()}]{C.R}")
-        print(f"{C.LPUR}[10]{C.R} {C.WHT}Biệt danh tab (Alias) [{len(ALIASES)} tab]{C.R}")
-        print(f"{C.LPUR}[11]{C.R} {C.WHT}Kiểm tra mạng trước khi rejoin [{'Bật' if NET_CHECK else 'Tắt'}]{C.R}")
-        print(f"{C.LPUR}[12]{C.R} {C.WHT}Lịch tự động restart [{auto_restart_label()}]{C.R}")
-        print(f"{C.LPUR}[13]{C.R} {C.WHT}Client Key Injector [{key_label()}]{C.R}")
-        print(f"{C.LPUR}[14]{C.R} {C.WHT}Phát hiện màn hình trắng/đen & GUI đứng [{screen_guard_label()}]{C.R}")
-        print(f"{C.LPUR}[15]{C.R} {C.WHT}Auto Server Hop (đổi server khi lag) [{hop_label()}]{C.R}")
+        print(f"{C.LPUR}[3]{C.R} {C.WHT}Auto Clear Data [{'Bật' if AUTO_CLEAR_DATA else 'Tắt'}]{C.R}")
+        print(f"{C.LPUR}[4]{C.R} {C.WHT}Auto Backup [{'Bật' if AUTO_BACKUP else 'Tắt'}]{C.R}")
+        print(f"{C.LPUR}[5]{C.R} {C.WHT}Cảnh báo RAM [{'Bật' if LOW_RAM_ALERT else 'Tắt'}]{C.R}")
+        print(f"{C.LPUR}[6]{C.R} {C.WHT}Profile [{len(PROFILES)}]{C.R}")
+        print(f"{C.LPUR}[7]{C.R} {C.WHT}Tìm kiếm package{C.R}")
+        print(f"{C.LPUR}[8]{C.R} {C.WHT}Hẹn giờ [{'Bật' if (SCHEDULE.get('start') or SCHEDULE.get('stop')) else 'Tắt'}]{C.R}")
+        print(f"{C.LPUR}[9]{C.R} {C.WHT}Graphics Optimizer [{gfx_settings_label()}]{C.R}")
+        print(f"{C.LPUR}[10]{C.R} {C.WHT}Biệt danh tab [{len(ALIASES)}]{C.R}")
+        print(f"{C.LPUR}[11]{C.R} {C.WHT}Kiểm tra mạng [{'Bật' if NET_CHECK else 'Tắt'}]{C.R}")
+        print(f"{C.LPUR}[12]{C.R} {C.WHT}Lịch restart [{auto_restart_label()}]{C.R}")
+        print(f"{C.LPUR}[13]{C.R} {C.WHT}Key Injector [{key_label()}]{C.R}")
+        print(f"{C.LPUR}[14]{C.R} {C.WHT}Màn hình trắng/đen [{screen_guard_label()}]{C.R}")
+        print(f"{C.LPUR}[15]{C.R} {C.WHT}Server Hop [{hop_label()}]{C.R}")
         print(f"{C.LPUR}[16]{C.R} {C.WHT}Pain AI{C.R}")
-        print(f"{C.LPUR}[17]{C.R} {C.WHT}Giờ im lặng cảnh báo [{'Bật' if QUIET_HOURS.get('enabled') else 'Tắt'}]{C.R}")
-        print(f"{C.LPUR}[18]{C.R} {C.WHT}Giới hạn thời gian chạy [{'Bật' if STOP_TIMER.get('enabled') else 'Tắt'}]{C.R}")
-        print(f"{C.LPUR}[19]{C.R} {C.WHT}Chế độ chỉ theo dõi [{'Bật' if MONITOR_ONLY else 'Tắt'}]{C.R}")
-        print(f"{C.LPUR}[20]{C.R} {C.WHT}Lưu ảnh khi có lỗi nghiêm trọng [{'Bật' if SCREEN_ARCHIVE.get('enabled') else 'Tắt'}]{C.R}")
+        print(f"{C.LPUR}[17]{C.R} {C.WHT}Giờ im lặng [{'Bật' if QUIET_HOURS.get('enabled') else 'Tắt'}]{C.R}")
+        print(f"{C.LPUR}[18]{C.R} {C.WHT}Giới hạn thời gian [{'Bật' if STOP_TIMER.get('enabled') else 'Tắt'}]{C.R}")
+        print(f"{C.LPUR}[19]{C.R} {C.WHT}Chỉ theo dõi [{'Bật' if MONITOR_ONLY else 'Tắt'}]{C.R}")
+        print(f"{C.LPUR}[20]{C.R} {C.WHT}Lưu ảnh lỗi nặng [{'Bật' if SCREEN_ARCHIVE.get('enabled') else 'Tắt'}]{C.R}")
         print(f"{C.LPUR}[21]{C.R} {C.WHT}Set up cấu hình{C.R}")
-        print(f"{C.RED}[0] Quay lại menu chính{C.R}")
+        print(f"{C.RED}[0] Quay lại{C.R}")
         sub = input("Chọn: ").strip()
         if sub == "1":
             announce_choice("1", "Set up auto rejoin")
@@ -10388,15 +10482,15 @@ def menu_choose_run_mode():
         clear_screen()
         section_title("CHỌN MODE PACKAGE MUỐN CHẠY")
         print(f" {C.LPUR}[1]{C.R} {C.WHT}Prefix Mode{C.R}")
-        print(f"    → Quét package theo prefix ({PACKAGE_PREFIX})\n")
+        print(f"    {C.GRY}prefix: {PACKAGE_PREFIX}{C.R}")
         print(f" {C.LPUR}[2]{C.R} {C.WHT}Custom Package List Mode{C.R}")
-        print(f"    → Dùng danh sách custom ({len(CUSTOM_PACKAGES)} package)\n")
+        print(f"    {C.GRY}{len(CUSTOM_PACKAGES)} package{C.R}")
         print(f" {C.RED}[0] Quay lại{C.R}\n")
         choice = ask("Chọn:").strip()
         if choice == "0":
             return
         elif choice == "1":
-            packages_list = sorted(list_installed_packages())
+            packages_list = sorted(scan_prefix_packages())
             if not packages_list:
                 msg_err(f"Không tìm thấy package nào khớp '{PACKAGE_PREFIX}'.")
                 wait_enter()
@@ -10426,9 +10520,9 @@ def menu_run_count_selective(packages_list):
         else:
             print(f"{C.GRY}Đang chọn chạy: tất cả package{C.R}")
         print(f"\n{C.LPUR}[1]{C.R} {C.WHT}Custom Count Mode{C.R}")
-        print(f"    → Nhập số N để chạy N package đầu tiên trong danh sách\n")
+        print(f"    {C.GRY}chạy N package đầu{C.R}")
         print(f"{C.LPUR}[2]{C.R} {C.WHT}Selective Mode{C.R}")
-        print(f"    → Chọn từng package, tool chỉ chạy các package đã chọn\n")
+        print(f"    {C.GRY}chọn từng package{C.R}")
         print(f"{C.RED}[0] Quay lại{C.R}\n")
         sub = ask("Chọn chế độ:").strip()
         if sub == "0":
@@ -10441,28 +10535,96 @@ def menu_run_count_selective(packages_list):
             msg_err("Lựa chọn không hợp lệ.")
             time.sleep(1)
 
+_ANDROID_ID_RX = re.compile(r"[0-9a-f]{16}")
+
+def _read_android_id():
+    return sh("settings get secure android_id", timeout=5).strip()
+
+def _apply_android_id(new_id):
+    """Đặt Android ID mới, xác minh bằng cách đọc lại. Trả về (ok, id_thực_tế)."""
+    sh(f"settings put secure android_id {shlex.quote(new_id)}", timeout=8)
+    now_id = _read_android_id()
+    return now_id == new_id, now_id
+
+def _record_android_id_change(old_id, new_id):
+    global ANDROID_ID_ORIGINAL, ANDROID_ID_HISTORY
+    if not ANDROID_ID_ORIGINAL and old_id:
+        ANDROID_ID_ORIGINAL = old_id
+    ANDROID_ID_HISTORY.append({"time": datetime.now().strftime("%d/%m %H:%M:%S"), "id": new_id})
+    ANDROID_ID_HISTORY = ANDROID_ID_HISTORY[-10:]
+    save_config_file()
+
 def menu_change_id():
-    clear_screen()
-    section_title("CHANGE ANDROID ID")
-    new_id = input("Nhập ID mới (Để trống để tạo ngẫu nhiên): ").strip()
-    if not new_id:
-        new_id = "".join(random.choices(string.hexdigits.lower(), k=16))
-        msg_info(f"Đã tạo ID ngẫu nhiên: {new_id}")
-    msg_info("Đang áp dụng ID mới...")
-    sh(f"settings put secure android_id {shlex.quote(new_id)}")
-    current = sh("settings get secure android_id", timeout=5).strip()
-    if current == new_id:
-        msg_done(f"Đã đổi Android ID thành công: {new_id}")
-    else:
-        msg_warn(f"Đã gửi lệnh đổi ID: {new_id}")
-    wait_enter()
+    """Đổi Android ID (dùng chung cho toàn máy): ngẫu nhiên, nhập tay, khôi phục ID gốc, xem lịch sử."""
+    if not root_mode():
+        clear_screen()
+        section_title("CHANGE ANDROID ID")
+        msg_err("Cần quyền root để đổi Android ID.")
+        wait_enter()
+        return
+    while True:
+        clear_screen()
+        section_title("CHANGE ANDROID ID")
+        cur = _read_android_id() or "(không đọc được)"
+        print(f" {C.GRY}ID hiện tại:{C.R} {C.WHT}{cur}{C.R}")
+        orig = ANDROID_ID_ORIGINAL or "(chưa lưu — sẽ lưu ở lần đổi đầu tiên)"
+        print(f" {C.GRY}ID gốc:{C.R}     {C.WHT}{orig}{C.R}")
+        print(f" {C.YEL}Lưu ý: Android ID là của cả máy, đổi xong nên khởi động lại các tab để nhận ID mới.{C.R}\n")
+        print(f" {C.LPUR}[1]{C.R} {C.WHT}Đổi ngẫu nhiên{C.R}")
+        print(f" {C.LPUR}[2]{C.R} {C.WHT}Nhập ID thủ công{C.R} {C.GRY}(16 ký tự hex: 0-9, a-f){C.R}")
+        print(f" {C.LPUR}[3]{C.R} {C.WHT}Khôi phục ID gốc{C.R}")
+        print(f" {C.LPUR}[4]{C.R} {C.WHT}Xem lịch sử đổi ID{C.R}")
+        print(f" {C.RED}[0] Quay lại{C.R}\n")
+        sub = ask("Chọn:").strip()
+        if sub == "0":
+            return
+        if sub == "4":
+            clear_screen()
+            section_title("LỊCH SỬ ĐỔI ANDROID ID")
+            if not ANDROID_ID_HISTORY:
+                print(f"{C.GRY}Chưa có lần đổi nào.{C.R}")
+            for h in reversed(ANDROID_ID_HISTORY):
+                print(f" {C.GRY}{h.get('time','')}{C.R}  {C.WHT}{h.get('id')}{C.R}")
+            wait_enter()
+            continue
+        if sub == "1":
+            new_id = "".join(random.choices("0123456789abcdef", k=16))
+        elif sub == "2":
+            raw = ask("Nhập ID mới (16 ký tự hex):").strip().lower()
+            if not _ANDROID_ID_RX.fullmatch(raw):
+                msg_err("ID không hợp lệ: cần đúng 16 ký tự, chỉ gồm 0-9 và a-f.")
+                wait_enter()
+                continue
+            new_id = raw
+        elif sub == "3":
+            if not ANDROID_ID_ORIGINAL:
+                msg_err("Chưa có ID gốc đã lưu (chưa từng đổi ID).")
+                wait_enter()
+                continue
+            new_id = ANDROID_ID_ORIGINAL
+        else:
+            invalid_choice(sub)
+            continue
+
+        if cur == new_id:
+            msg_info("ID này đã đang dùng rồi.")
+            wait_enter()
+            continue
+        msg_info(f"Đang áp dụng ID: {new_id}")
+        ok, now_id = _apply_android_id(new_id)
+        if ok:
+            _record_android_id_change(cur if cur != "(không đọc được)" else "", new_id)
+            msg_done(f"Đã đổi Android ID thành công: {new_id}")
+        else:
+            msg_warn(f"Lệnh đã gửi nhưng ID đọc lại là '{now_id}' (ROM có thể không cho phép đổi).")
+        wait_enter()
 
 def send_test_webhook(url, content, embed_title, embed_desc):
     """Gửi tin thử tới webhook qua curl (tránh segfault SSL của urllib trên Android).
     Trả về (ok, thông báo)."""
     payload = json.dumps({
         "content": content,
-        "allowed_mentions": {"parse": ["everyone", "users"]},
+        "allowed_mentions": {"parse": (["everyone"] if "@everyone" in content else []) + ["users"]},
         "embeds": [{"title": embed_title, "description": embed_desc, "color": 0x57F287}],
     })
     import subprocess, shlex
@@ -10515,7 +10677,7 @@ def menu_webhook():
                 msg_err("Discord ID không hợp lệ (cần 17–20 chữ số, hoặc dạng <@id>). Sẽ ping @everyone.")
         DISCORD_UID = uid
         save_config_file()
-        mention = "@everyone" + (f" <@{DISCORD_UID}>" if DISCORD_UID else "")
+        mention = f"<@{DISCORD_UID}>" if DISCORD_UID else "@everyone"
         print(f" {C.YEL}[*] Đang gửi tin thử tới Discord...{C.R}")
         ok_test, info = send_test_webhook(
             WEBHOOK_URL, mention, "Webhook đã kết nối",
@@ -10590,8 +10752,8 @@ def menu_ai_setup():
         print(f" AI Anti-Ban: {C.GRN + 'BẬT' if ANTI_BAN.get('enabled') else C.RED + 'TẮT'}{C.R} (risk={ANTI_BAN.get('last_risk', 0)}%)")
         print()
         print(f"{C.LPUR}[1]{C.R} {C.WHT}Bật / tắt phân tích lỗi{C.R}")
-        print(f"{C.LPUR}[2]{C.R} {C.WHT}AI Đọc Màn Hình & Tự Động Xử Lý{C.R}")
-        print(f"{C.LPUR}[3]{C.R} {C.WHT}AI Nhận Diện & Tránh Bẫy Ban{C.R}")
+        print(f"{C.LPUR}[2]{C.R} {C.WHT}AI đọc màn hình{C.R}")
+        print(f"{C.LPUR}[3]{C.R} {C.WHT}AI tránh bẫy ban{C.R}")
         print(f"{C.RED}[0] Quay lại{C.R}\n")
         sub = ask("Chọn:").strip()
         if sub == "0":
