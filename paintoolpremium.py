@@ -3383,7 +3383,14 @@ def sh_args(args, timeout=15, merge_stderr=False):
 
 # ==================== MỞ / ĐÓNG GAME ====================
 def is_app_running(pkg):
+    # Tên tiến trình trên Android bị cắt tối đa 15 ký tự, nên pidof/ps có thể bỏ sót
+    # package dài (vd com.roblox.client, com.roblox.clone1). Kiểm tra cmdline đầy đủ trước.
     if sh(f"pidof {pkg}", timeout=3):
+        return True
+    pat = re.escape(pkg) + r"(:.*)?"
+    out = sh(f"cat /proc/[0-9]*/cmdline 2>/dev/null | tr '\\0' '\\n' | grep -qxE {shlex.quote(pat)} && echo 1",
+             timeout=6)
+    if "1" in (out or ""):
         return True
     for line in sh("ps -A", timeout=3).splitlines():
         parts = line.split()
@@ -3391,7 +3398,31 @@ def is_app_running(pkg):
             return True
     return False
 
+_WIN_BLOCK_RX = re.compile(r"^\s*(?:Window\s*#\d+|Window\{)", re.M)
+
+def _window_visible(dump, pkg):
+    """Kiểm tra cửa sổ của pkg có đang hiển thị không (không cần đang có focus).
+    Trả về True/False nếu đọc được; None nếu dump không có thông tin cửa sổ."""
+    if "isOnScreen=" not in dump and "mHasSurface=" not in dump and "mViewVisibility=" not in dump:
+        return None
+    starts = [m.start() for m in _WIN_BLOCK_RX.finditer(dump)] + [len(dump)]
+    found = False
+    for i in range(len(starts) - 1):
+        block = dump[starts[i]:starts[i + 1]]
+        if pkg not in block:
+            continue
+        if "isOnScreen=true" in block or "mHasSurface=true" in block:
+            return True
+    return False
+
 def is_app_in_foreground(pkg):
+    """Tab còn trong game (không bị văng ra Lobby). Dùng cửa sổ hiển thị, không dùng focus,
+    để tab chạy nền không bị coi là đã thoát game (nguyên nhân vòng lặp đa nhiệm)."""
+    dump = sh("dumpsys window windows", timeout=6)
+    vis = _window_visible(dump, pkg)
+    if vis is not None:
+        return vis
+    # Dump không có thông tin cửa sổ: dùng cách cũ theo focus
     markers = ("mCurrentFocus", "mFocusedApp", "mResumedActivity", "topResumedActivity")
     dump = sh("dumpsys window displays", timeout=5)
     if not any(m in dump for m in markers):
@@ -6356,20 +6387,41 @@ def _read_cookies_from_prefs(pkg):
         return {}, "không có cookie .ROBLOSECURITY trong shared_prefs"
     return found, None
 
-def get_cookie_account():
-    """Lấy cookie từ package đã chọn hoặc tất cả package"""
-    clear_screen()
-    section_title("LẤY COOKIE ACCOUNT ROBLOX")
+def _extract_cookie_from_pkg(pkg):
+    """Lấy .ROBLOSECURITY của một package. Trả về (cookie hoặc None, lý do)."""
+    found, reason1 = _read_cookies_from_webview_db(pkg)
+    reason = reason1
+    if COOKIE_NAME not in found:
+        found, reason2 = _read_cookies_from_prefs(pkg)
+        reason = f"{reason1 or ''} | {reason2 or ''}".strip(" |")
+    cookie = found.get(COOKIE_NAME) if COOKIE_NAME in found else None
+    return (cookie or None), (None if cookie else reason)
 
-    print(f"{C.GRY}Lấy .ROBLOSECURITY từ package Roblox trên thiết bị{C.R}\n")
+def _cookie_download_dir():
+    for d in ("/sdcard/Download", "/storage/emulated/0/Download", "/sdcard"):
+        if os.path.isdir(d):
+            return d
+    return None
+
+def _unique_path(folder, name):
+    base, ext = os.path.splitext(name)
+    path, i = os.path.join(folder, name), 2
+    while os.path.exists(path):
+        path = os.path.join(folder, f"{base} ({i}){ext}")
+        i += 1
+    return path
+
+def get_cookie_account():
+    """Lấy cookie từ package đã chọn: [1] lưu file .txt vào Download, [2] copy vào clipboard."""
+    clear_screen()
+    section_title("LẤY COOKIE ROBLOX")
 
     if not root_mode():
         msg_err("Cần quyền root để đọc dữ liệu riêng của các tab Roblox.")
         wait_enter()
         return
 
-    # Lấy danh sách package để quét (theo mode hiện tại)
-    pool = list_installed_packages()
+    pool = sorted(list_installed_packages())
     if not pool:
         if PACKAGE_MODE == "custom":
             msg_err("Custom Package List không có package nào trên máy.")
@@ -6377,140 +6429,82 @@ def get_cookie_account():
             msg_err(f"Không tìm thấy package nào khớp '{PACKAGE_PREFIX}'.")
         wait_enter()
         return
-    packages_to_check = [p for p in SELECTED_PACKAGES if p in pool] if SELECTED_PACKAGES else pool
 
-    cookies_found = []
+    print(f"{C.GRY}Package trên máy:{C.R}")
+    for i, pkg in enumerate(pool, 1):
+        print(f" {C.LPUR}[{i}]{C.R} {pkg}")
+    print()
+    print(f" {C.LPUR}[1]{C.R} {C.WHT}Lưu thành file .txt (Download){C.R}")
+    print(f" {C.LPUR}[2]{C.R} {C.WHT}Copy vào clipboard{C.R}")
+    print(f" {C.RED}[0] Quay lại{C.R}\n")
+    action = ask("Chọn:").strip()
+    if action == "0":
+        return
+    if action not in ("1", "2"):
+        invalid_choice(action)
+        return
 
-    for pkg in sorted(packages_to_check):
-        print(f"{C.GRY}Kiểm tra {pkg}...{C.R}")
-
-        # Thử CSDL WebView trước, rồi shared_prefs; giữ lý do của cả hai để báo đúng nguyên nhân
-        found_cookies, reason1 = _read_cookies_from_webview_db(pkg)
-        reason = reason1
-        if COOKIE_NAME not in found_cookies:
-            found_cookies, reason2 = _read_cookies_from_prefs(pkg)
-            reason = f"{reason1 or ''} | {reason2 or ''}".strip(" |")
-
-        if COOKIE_NAME in found_cookies:
-            cookie = found_cookies[COOKIE_NAME]
-            valid, msg = roblox_check_cookie(cookie)
-
-            status = f"{C.GRN}✓ Còn hạn{C.R}"
-            if valid is False:
-                status = f"{C.RED}✗ Hết hạn{C.R}"
-            elif valid is None:
-                status = f"{C.YEL}? Không kiểm tra được{C.R}"
-
-            cookies_found.append((pkg, cookie, status))
-            print(f"  {status}\n")
-        else:
-            print(f"  {C.RED}✗ Không tìm thấy cookie{C.R}")
-            print(f"    {C.GRY}Lý do: {reason}{C.R}\n")
-
-    if not cookies_found:
-        msg_err("Không lấy được cookie nào. Xem lý do ở từng package phía trên.")
+    raw = ask("Chọn package (vd: 1 hoặc 1 2):").strip()
+    picks = []
+    for part in raw.replace(",", " ").split():
+        if part.isdigit() and 1 <= int(part) <= len(pool) and pool[int(part) - 1] not in picks:
+            picks.append(pool[int(part) - 1])
+    if not picks:
+        msg_err("Số package không hợp lệ.")
+        wait_enter()
+        return
+    if action == "2" and len(picks) > 1:
+        msg_err("Copy chỉ chọn 1 package một lần.")
         wait_enter()
         return
 
-    # Display found cookies
-    clear_screen()
-    section_title("COOKIE FOUND")
-    print(f"Tìm thấy {len(cookies_found)} cookie:\n")
+    done = 0
+    for pkg in picks:
+        print(f"\n{C.GRY}▸ {pkg}{C.R}")
+        cookie, reason = _extract_cookie_from_pkg(pkg)
+        if not cookie:
+            msg_err(f"Không lấy được cookie: {reason}")
+            continue
+        print(f"  {C.GRY}{cookie_preview(cookie)}{C.R}")
 
-    for i, (pkg, cookie, status) in enumerate(cookies_found, 1):
-        print(f"{C.LPUR}[{i}]{C.R} {pkg}")
-        print(f"    {status}")
-        print(f"    {cookie_preview(cookie)}\n")
-
-    def _copy_to_clipboard(text):
-        """Copy text dùng termux-clipboard-set (Android). Trả về False nếu không copy được."""
-        if not shutil.which("termux-clipboard-set"):
-            return False
-        try:
-            res = subprocess.run(["termux-clipboard-set", text], capture_output=True,
-                                 timeout=8, stdin=subprocess.DEVNULL)
-            return res.returncode == 0
-        except Exception:
-            return False
-
-    print(f"{C.LPUR}[1]{C.R} Copy cookie đầu tiên vào clipboard")
-    print(f"{C.LPUR}[2]{C.R} Chọn cookie để copy")
-    print(f"{C.LPUR}[3]{C.R} Lưu tất cả vào file")
-    print(f"{C.LPUR}[4]{C.R} Dùng cookie để đăng nhập tab khác ngay")
-    print(f"{C.RED}[0] Quay lại{C.R}\n")
-
-    choice = ask("Chọn:").strip()
-
-    if choice == "1":
-        cookie = cookies_found[0][1]
-        if _copy_to_clipboard(cookie):
-            msg_done(f"Đã copy vào clipboard: {cookie_preview(cookie)}")
-        else:
-            try:
-                with open(COOKIE_FILE_DEFAULT, "w") as f:
-                    f.write(cookie)
-                msg_done(f"Clipboard không khả dụng, lưu vào: {COOKIE_FILE_DEFAULT}")
-            except Exception:
-                msg_err("Không thể copy/lưu cookie.")
-        wait_enter()
-
-    elif choice == "2":
-        idx = ask(f"Chọn [1-{len(cookies_found)}]:").strip()
-        if idx.isdigit() and 1 <= int(idx) <= len(cookies_found):
-            cookie = cookies_found[int(idx) - 1][1]
-            if _copy_to_clipboard(cookie):
-                msg_done(f"Đã copy vào clipboard: {cookie_preview(cookie)}")
+        if action == "2":
+            if not shutil.which("termux-clipboard-set"):
+                msg_err("Thiếu Termux:API (termux-clipboard-set), không copy được.")
+                continue
+            res = subprocess.run(["termux-clipboard-set", cookie], capture_output=True, timeout=8)
+            if res.returncode == 0:
+                msg_done(f"Đã copy cookie của {pkg}.")
+                done += 1
             else:
-                try:
-                    with open(COOKIE_FILE_DEFAULT, "w") as f:
-                        f.write(cookie)
-                    msg_done(f"Lưu vào: {COOKIE_FILE_DEFAULT}")
-                except Exception:
-                    msg_err("Không thể copy/lưu cookie.")
-            wait_enter()
-        else:
-            msg_err("Lựa chọn không hợp lệ.")
-            wait_enter()
+                msg_err("Copy thất bại.")
+            continue
 
-    elif choice == "3":
-        save_file = ask("Nhập tên file (mặc định: cookies.json):").strip() or "cookies.json"
-        if not save_file.endswith(".json"):
-            save_file += ".json"
-        data = {
-            "timestamp": datetime.now().isoformat(),
-            "cookies": [
-                {
-                    "package": pkg,
-                    "cookie": cookie,
-                    "preview": cookie_preview(cookie),
-                    "status": re.sub(r'\033\[[0-9;]*m', '', status).strip()
-                }
-                for pkg, cookie, status in cookies_found
-            ]
-        }
+        # action 1: tên file theo username Roblox
+        state, info = roblox_check_cookie(cookie)
+        username = info.get("name") if state is True and isinstance(info, dict) else None
+        if username:
+            safe = re.sub(r"[^A-Za-z0-9_]", "", username)
+            name = f"cookie {safe}.txt"
+        else:
+            name = f"cookie {pkg}.txt"
+            msg_info("Chưa lấy được username (cookie có thể đã đăng xuất), đặt tên theo package.")
+        folder = _cookie_download_dir()
+        if not folder:
+            msg_err("Không tìm thấy thư mục Download. Chạy 'termux-setup-storage' rồi thử lại.")
+            continue
+        path = _unique_path(folder, name)
         try:
-            with open(save_file, "w") as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
-            msg_done(f"Lưu {len(cookies_found)} cookie vào: {save_file}")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(cookie + "\n")
+            msg_done(f"Đã lưu: {path}")
+            done += 1
         except Exception as e:
-            msg_err(f"Lỗi lưu file: {str(e)}")
-        wait_enter()
+            msg_err(f"Không ghi được file: {e}")
 
-    elif choice == "4":
-        # Dùng cookie vừa lấy để đăng nhập tab khác
-        if len(cookies_found) == 1:
-            sel_idx = 0
-        else:
-            raw = ask(f"Chọn cookie cần dùng [1-{len(cookies_found)}]:").strip()
-            if not raw.isdigit() or not (1 <= int(raw) <= len(cookies_found)):
-                msg_err("Không hợp lệ.")
-                wait_enter()
-                return
-            sel_idx = int(raw) - 1
-        cookie = cookies_found[sel_idx][1]
-        print(f"\n{C.GRY}Cookie: {cookie_preview(cookie)}{C.R}\n")
-        login_one_cookie(cookie, 1, 1)
-        wait_enter()
+    print()
+    if done:
+        msg_info(f"Hoàn tất: {done}/{len(picks)}.")
+    wait_enter()
 
 def menu_cookie_roblox():
     """Menu chính cho Cookie Roblox - chọn giữa Login hoặc Get Cookie"""
