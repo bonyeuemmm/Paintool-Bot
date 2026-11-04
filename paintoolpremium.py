@@ -36,7 +36,7 @@ except ImportError:
                     key, val = line.split('=', 1)
                     os.environ[key.strip()] = val.strip().strip('"').strip("'")
 
-VERSION = "v3.4.8"
+VERSION = "v3.4.5"
 
 # ==================== GLOBAL CONSTANTS (SERVER_URL / SECRET_KEY) ====================
 SERVER_URL = "https://pain-tool-rejoin-bot.apps.bot-hosting.cloud/api/verify"
@@ -793,7 +793,7 @@ AUTO_RESTART_ACTION = "reset"
 NEXT_AUTO_RESTART = None
 SCREENSHOT_MIN_GAP_SEC = 60
 _LAST_SHOT = 0
-EXECUTOR_NAMES = ["Delta", "Codex", "ArceusX", "Fluxus", "Hydrogen", "Valyse", "VegaX", "Krampus", "Evon"]
+EXECUTOR_NAMES = ["Delta", "ArceusX", "Fluxus", "Hydrogen", "Codex", "Valyse", "VegaX", "Krampus", "Ronin", "Cryptic"]
 
 def tab_name(pkg):
     return ALIASES.get(pkg) or pkg
@@ -8268,10 +8268,29 @@ def menu_stability_stats():
 
 
 # ==================== AUTO-EXEC MANAGER ====================
+# Mỗi executor có thể dùng tên thư mục khác nhau (Autoexec / autoexec / scripts)
+EXECUTOR_AUTOEXEC_VARIANTS = ["autoexec", "Autoexec", "scripts", "Scripts", "workspace", "Workspace"]
+
 def autoexec_dirs():
-    dirs = [f"/sdcard/{n}/Autoexec" for n in EXECUTOR_NAMES]
+    """Trả về các thư mục autoexec thực sự tồn tại trên máy.
+    - Executor: chỉ thêm nếu thư mục đã có (executor đã cài), không tạo mới.
+    - Package clone: thư mục trong /Android/data/<pkg>/files/autoexec (tạo nếu chưa có).
+    """
+    dirs = []
+    # Executor đã cài: thử nhiều tên thư mục khác nhau, chỉ thêm nếu tồn tại
+    for name in EXECUTOR_NAMES:
+        for variant in EXECUTOR_AUTOEXEC_VARIANTS:
+            cand = f"/sdcard/{name}/{variant}"
+            if _path_exists(cand):
+                dirs.append(cand)
+                break  # thư mục đầu tiên tìm thấy là đúng, bỏ qua các variant khác
+    # Package clone: tạo thư mục nếu chưa có
     for pkg in list_installed_packages():
-        dirs.append(f"/sdcard/Android/data/{pkg}/files/autoexec")
+        cand = f"/sdcard/Android/data/{pkg}/files/autoexec"
+        if not _path_exists(cand):
+            _mkdir_target(cand)
+        if _path_exists(cand):
+            dirs.append(cand)
     return dirs
 
 def _path_exists(p):
