@@ -705,7 +705,7 @@ client.on('interactionCreate', async interaction => {
 
                 const cooldown = 24 * 60 * 60 * 1000;
 
-                let expireText = r => r.expires_at === 0 ? '`Vĩnh viễn`' : (r.expires_at > currentNow ? `<t:${Math.floor(r.expires_at / 1000)}:R>` : '`Đã hết hạn`');
+                const expireText = r => r.expires_at === 0 ? 'Vĩnh viễn' : (r.expires_at > currentNow ? `<t:${Math.floor(r.expires_at / 1000)}:R>` : 'Đã hết hạn');
                 let resetStatusText = '🟢 Sẵn sàng Reset HWID';
 
                 if (row.last_reset && (currentNow - row.last_reset < cooldown)) {
@@ -721,9 +721,9 @@ client.on('interactionCreate', async interaction => {
                     .setThumbnail(i.user.displayAvatarURL({ dynamic: true }))
                     .addFields(
                         { name: '⌛ Hạn Sử Dụng', value: expireText(row), inline: true },
-                        { name: '🖥️ Trạng Thái HWID', value: row.hwid ? '🔒 `Đã có HWID`' : '🔓 `N/A`', inline: true },
+                        { name: '🖥️ Trạng Thái HWID', value: row.hwid ? '🔒 Đã có HWID' : '🔓 N/A', inline: true },
                         { name: '🔄 Trạng Thái Reset', value: resetStatusText, inline: true },
-                        { name: '🔑 Mã Tool Key (Click Mã Bên Dưới Để Copy)', value: `\`\`\`\n${row.assigned_key}\n\`\`\``, inline: false }
+                        { name: '🔑 Mã Tool Key (Nhấn giữ để sao chép)', value: `\`\`\`text\n${row.assigned_key}\n\`\`\``, inline: false }
                     )
                     .setFooter(getFooterOptions());
 
