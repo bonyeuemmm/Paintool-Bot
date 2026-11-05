@@ -4,7 +4,8 @@ const {
     REST, 
     Routes, 
     SlashCommandBuilder, 
-    EmbedBuilder, 
+    EmbedBuilder,
+    AttachmentBuilder,
     ActionRowBuilder, 
     StringSelectMenuBuilder,
     ComponentType
@@ -81,7 +82,6 @@ const Admin = mongoose.model('Admin', adminSchema);
 const keySchema = new mongoose.Schema({
     key: String,
     assigned_key: { type: String, default: null },
-    legacy_keys: { type: [String], default: [] },
     hwid: { type: String, default: null },
     expires_at: { type: Number, default: 0 },
     duration_days: { type: Number, default: 0 },
@@ -101,62 +101,9 @@ const tokenSchema = new mongoose.Schema({
 });
 const ResetToken = mongoose.model('ResetToken', tokenSchema);
 
-// Tạo Tool Key theo định dạng PAIN-XXXX-XXXX-XXXX.
-function generateToolKey() {
-    const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-    let value = '';
-    while (value.length < 12) {
-        for (const byte of crypto.randomBytes(16)) {
-            value += alphabet[byte % alphabet.length];
-            if (value.length === 12) break;
-        }
-    }
-    return `PAIN-${value.slice(0, 4)}-${value.slice(4, 8)}-${value.slice(8, 12)}`;
-}
-
-async function createUniqueToolKey() {
-    for (let attempt = 0; attempt < 20; attempt++) {
-        const candidate = generateToolKey();
-        const exists = await Key.exists({
-            $or: [{ assigned_key: candidate }, { legacy_keys: candidate }]
-        });
-        if (!exists) return candidate;
-    }
-    throw new Error('Không thể tạo Tool Key duy nhất sau nhiều lần thử.');
-}
-
-// Chuyển key cũ tự động nhưng giữ alias để các bản tool đang lưu key cũ
-// vẫn xác thực được cho tới khi người dùng lấy key mới bằng /getkey.
-async function migrateLegacyToolKeys() {
-    const oldRows = await Key.find({
-        assigned_key: /^pain_key_\d{6}$/i
-    });
-
-    let migrated = 0;
-    for (const row of oldRows) {
-        const oldKey = row.assigned_key;
-        const newKey = await createUniqueToolKey();
-
-        row.legacy_keys = Array.from(new Set([...(row.legacy_keys || []), oldKey]));
-        row.assigned_key = newKey;
-        await row.save();
-        migrated++;
-        console.log(`🔁 Đã chuyển Tool Key cũ sang định dạng mới cho bản ghi ${row._id}.`);
-    }
-
-    console.log(`✅ Hoàn tất chuyển đổi Tool Key cũ: ${migrated} key.`);
-}
-
 console.log('🔄 Đang tiến hành kết nối đến MongoDB Atlas...');
 mongoose.connect(MONGODB_URI)
-    .then(async () => {
-        console.log('✅ Đã kết nối MongoDB Atlas thành công!');
-        try {
-            await migrateLegacyToolKeys();
-        } catch (migrationError) {
-            console.error('❌ Lỗi chuyển đổi Tool Key cũ:', migrationError);
-        }
-    })
+    .then(() => console.log('✅ Đã kết nối MongoDB Atlas thành công!'))
     .catch(err => console.error('❌ Lỗi kết nối MongoDB:', err));
 
 const app = express();
@@ -218,7 +165,7 @@ app.post(['/', '/api/verify'], async (req, res) => {
             return res.json({ valid: false, reason: "invalid_signature" });
         }
 
-        const row = await Key.findOne({ $or: [{ assigned_key: key }, { legacy_keys: key }] });
+        const row = await Key.findOne({ assigned_key: key });
         if (!row) return res.json({ valid: false, reason: "key_not_found" });
         if (row.expires_at !== 0 && Date.now() > row.expires_at) return res.json({ valid: false, reason: "expired" });
         
@@ -285,9 +232,11 @@ const commands = [
         .addUserOption(opt => opt.setName('user').setDescription('Thành viên target').setRequired(true)),
     new SlashCommandBuilder().setName('createkey').setDescription('Tạo key bản quyền Premium')
         .addStringOption(opt => opt.setName('duration').setDescription('Thời hạn key').setRequired(true).addChoices({name: '1 Ngày', value: '1'}, {name: '3 Ngày', value: '3'}, {name: '7 Ngày', value: '7'}, {name: '30 Ngày', value: '30'}, {name: 'Vĩnh viễn', value: '0'}))
-        .addUserOption(opt => opt.setName('user').setDescription('Gửi key qua DM cho user').setRequired(false)),
+        .addUserOption(opt => opt.setName('user').setDescription('Gửi key qua DM cho user').setRequired(false))
+        .addIntegerOption(opt => opt.setName('quantity').setDescription('Số lượng muốn tạo (mặc định 1, tối đa 50)').setRequired(false).setMinValue(2).setMaxValue(50)),
     new SlashCommandBuilder().setName('gettoken').setDescription('Tạo token cho phép Reset HWID')
-        .addUserOption(opt => opt.setName('user').setDescription('Gửi token qua DM cho user').setRequired(false)),
+        .addUserOption(opt => opt.setName('user').setDescription('Gửi token qua DM cho user').setRequired(false))
+        .addIntegerOption(opt => opt.setName('quantity').setDescription('Số lượng muốn tạo (mặc định 1, tối đa 50)').setRequired(false).setMinValue(2).setMaxValue(50)),
     new SlashCommandBuilder().setName('getkey').setDescription('Xem danh sách & thông tin chi tiết key của bạn'),
     new SlashCommandBuilder().setName('removekey').setDescription('Xóa key khỏi hệ thống (Chỉ Owner)')
         .addStringOption(opt => opt.setName('toolkey').setDescription('Mã Tool Key cần xóa').setRequired(true)),
@@ -490,61 +439,62 @@ client.on('interactionCreate', async interaction => {
                 return interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLORS.ERROR).setTitle('❌ TỪ CHỐI TRUY CẬP').setDescription('Bạn không đủ thẩm quyền để tạo key bản quyền!').setThumbnail(userAvatar).setFooter(getFooterOptions())] });
             }
 
-            const duration = parseInt(interaction.options.getString('duration'));
+            const duration = parseInt(interaction.options.getString('duration'), 10);
             const targetUser = interaction.options.getUser('user');
-            const keyStr = Math.floor(100000000000 + Math.random() * 900000000000).toString();
+            const quantity = interaction.options.getInteger('quantity') ?? 1;
+            if (!Number.isInteger(quantity) || quantity < 1 || quantity > 50 || (quantity !== 1 && quantity < 2)) {
+                return interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLORS.ERROR).setTitle('❌ SỐ LƯỢNG KHÔNG HỢP LỆ').setDescription('Số lượng mặc định là **1**, hoặc nhập từ **2 đến 50**.').setFooter(getFooterOptions())] });
+            }
 
-            await new Key({ key: keyStr, expires_at: 0, duration_days: duration, is_used: 0 }).save();
+            const generatedKeys = [];
+            for (let i = 0; i < quantity; i++) {
+                let keyStr;
+                let exists = true;
+                while (exists) {
+                    keyStr = Math.floor(100000000000 + Math.random() * 900000000000).toString();
+                    exists = await Key.exists({ key: keyStr });
+                }
+                await new Key({ key: keyStr, expires_at: 0, duration_days: duration, is_used: 0 }).save();
+                generatedKeys.push(keyStr);
+            }
 
             if (userId !== OWNER_ID) {
                 const ownerEmbed = new EmbedBuilder()
                     .setColor(COLORS.GOLD)
                     .setTitle('📢 BOT LOG: ADMIN TẠO KEY MỚI')
                     .addFields(
-                        { name: '👤 Admin Thực Hiện', value: `<@${userId}> \`(${interaction.user.tag})\``, inline: true },
-                        { name: '⏱️ Thời Hạn Gói', value: duration === 0 ? '`Vĩnh viễn`' : `\`${duration} Ngày\``, inline: true },
-                        { name: '📥 Người Nhận', value: targetUser ? `<@${targetUser.id}> \`(${targetUser.tag})\`` : '`Không chọn`', inline: true },
-                        { name: '🎟️ Mã Key Kích Hoạt (Click Để Copy)', value: `\`\`\`\n${keyStr}\n\`\`\``, inline: false }
-                    )
-                    .setThumbnail(userAvatar)
-                    .setFooter(getFooterOptions());
-                notifyOwner(client, ownerEmbed); // Gửi ẩn không await
+                        { name: '👤 Admin Thực Hiện', value: `<@${userId}> (${interaction.user.tag})`, inline: true },
+                        { name: '⏱️ Thời Hạn Gói', value: duration === 0 ? 'Vĩnh viễn' : `${duration} Ngày`, inline: true },
+                        { name: '🔢 Số lượng', value: `${quantity}`, inline: true },
+                        { name: '📥 Người Nhận', value: targetUser ? `<@${targetUser.id}> (${targetUser.tag})` : 'Không chọn', inline: true }
+                    ).setThumbnail(userAvatar).setFooter(getFooterOptions());
+                notifyOwner(client, ownerEmbed);
             }
 
+            if (quantity >= 5) {
+                try {
+                    const file = new AttachmentBuilder(Buffer.from(generatedKeys.join('\n'), 'utf8'), { name: 'PAIN KEY.text' });
+                    await interaction.user.send({ content: `✅ Đã tạo **${quantity} Key** thành công. Thời hạn: **${duration === 0 ? 'Vĩnh viễn' : `${duration} ngày`}**.`, files: [file] });
+                    await interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLORS.GOLD).setTitle('🎟️ TẠO KEY HÀNG LOẠT THÀNH CÔNG').setDescription(`✅ Đã tạo **${quantity} Key**. File **PAIN KEY.text** đã được gửi qua DM cho bạn.${targetUser ? `\nNgười nhận được chọn: <@${targetUser.id}>.` : ''}`).setThumbnail(userAvatar).setFooter(getFooterOptions())] });
+                } catch (e) {
+                    await interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLORS.WARNING).setTitle('⚠️ ĐÃ TẠO KEY NHƯNG KHÔNG GỬI ĐƯỢC DM').setDescription(`Đã lưu **${quantity} Key** vào hệ thống nhưng không thể gửi file qua DM. Hãy bật nhận tin nhắn từ server rồi thử lại hoặc liên hệ Owner.`).setFooter(getFooterOptions())] });
+                }
+                return;
+            }
+
+            const keyLines = generatedKeys.map((key, i) => `**${i + 1}.** \`${key}\``).join('\n');
             if (targetUser) {
                 try {
-                    const dmEmbed = new EmbedBuilder()
-                        .setColor(COLORS.GOLD)
-                        .setTitle('🎉 BẠN ĐÃ NHẬN ĐƯỢC KEY BẢN QUYỀN')
-                        .setDescription(`Quản trị viên đã gửi tặng bạn một key kích hoạt tool premium.\n\n**Mã Key Kích Hoạt:**\n\`\`\`\n${keyStr}\n\`\`\`\n• **Thời hạn gói:** ${duration === 0 ? '`Vĩnh viễn`' : `\`${duration} Ngày\``}\n\n👉 Sử dụng lệnh \`/redeem key:${keyStr}\` trong server để kích hoạt ngay!`)
-                        .setThumbnail(targetUser.displayAvatarURL({ dynamic: true }))
-                        .setFooter(getFooterOptions());
+                    const dmEmbed = new EmbedBuilder().setColor(COLORS.GOLD).setTitle('🎉 BẠN ĐÃ NHẬN ĐƯỢC KEY BẢN QUYỀN')
+                        .setDescription(`Quản trị viên đã gửi cho bạn **${quantity} Key** kích hoạt tool premium.\n\n${keyLines}\n\n• **Thời hạn:** ${duration === 0 ? 'Vĩnh viễn' : `${duration} ngày`}\n👉 Dùng lệnh /redeem để kích hoạt.`)
+                        .setThumbnail(targetUser.displayAvatarURL({ dynamic: true })).setFooter(getFooterOptions());
                     await targetUser.send({ embeds: [dmEmbed] });
-
-                    const replyEmbed = new EmbedBuilder()
-                        .setColor(COLORS.GOLD)
-                        .setTitle('🎟️ KHỞI TẠO KEY THÀNH CÔNG')
-                        .setDescription(`✅ Đã tạo key và tự động gửi trực tiếp qua DM cho **${targetUser.tag}**.\n\n**Mã Key Kích Hoạt:**\n\`\`\`\n${keyStr}\n\`\`\``)
-                        .setThumbnail(userAvatar)
-                        .setFooter(getFooterOptions());
-                    await interaction.editReply({ embeds: [replyEmbed] });
+                    await interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLORS.GOLD).setTitle('🎟️ KHỞI TẠO KEY THÀNH CÔNG').setDescription(`✅ Đã tạo **${quantity} Key** và gửi qua DM cho **${targetUser.tag}**.\n\n${keyLines}`).setThumbnail(userAvatar).setFooter(getFooterOptions())] });
                 } catch (e) {
-                    const replyEmbed = new EmbedBuilder()
-                        .setColor(COLORS.WARNING)
-                        .setTitle('🎟️ KHỞI TẠO KEY THÀNH CÔNG')
-                        .setDescription(`⚠️ Không thể gửi DM cho **${targetUser.tag}** (Người dùng tắt nhận DM).\n\n**Mã Key Kích Hoạt:**\n\`\`\`\n${keyStr}\n\`\`\``)
-                        .setThumbnail(userAvatar)
-                        .setFooter(getFooterOptions());
-                    await interaction.editReply({ embeds: [replyEmbed] });
+                    await interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLORS.WARNING).setTitle('⚠️ TẠO KEY THÀNH CÔNG').setDescription(`Không thể gửi DM cho **${targetUser.tag}**. Các Key đã được tạo:\n\n${keyLines}`).setFooter(getFooterOptions())] });
                 }
             } else {
-                const replyEmbed = new EmbedBuilder()
-                    .setColor(COLORS.GOLD)
-                    .setTitle('🎟️ KHỞI TẠO KEY THÀNH CÔNG')
-                    .setDescription(`✅ Khởi tạo key kích hoạt thành công!\n\n**Mã Key Kích Hoạt:**\n\`\`\`\n${keyStr}\n\`\`\``)
-                    .setThumbnail(userAvatar)
-                    .setFooter(getFooterOptions());
-                await interaction.editReply({ embeds: [replyEmbed] });
+                await interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLORS.GOLD).setTitle('🎟️ KHỞI TẠO KEY THÀNH CÔNG').setDescription(`✅ Đã tạo **${quantity} Key** kích hoạt:\n\n${keyLines}\n\n• **Thời hạn:** ${duration === 0 ? 'Vĩnh viễn' : `${duration} ngày`}`).setThumbnail(userAvatar).setFooter(getFooterOptions())] });
             }
         }
         else if (commandName === 'gettoken') {
@@ -553,40 +503,57 @@ client.on('interactionCreate', async interaction => {
                 return interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLORS.ERROR).setTitle('❌ TỪ CHỐI TRUY CẬP').setDescription('Bạn không đủ thẩm quyền để khởi tạo Token Reset HWID!').setThumbnail(userAvatar).setFooter(getFooterOptions())] });
             }
             const targetUser = interaction.options.getUser('user');
-            const tokenStr = `token_${Math.floor(100000 + Math.random() * 900000)}`;
-
-            await new ResetToken({ token: tokenStr, user_id: targetUser ? targetUser.id : null }).save();
-
-            if (userId !== OWNER_ID) {
-                const ownerEmbed = new EmbedBuilder()
-                    .setColor(COLORS.INFO)
-                    .setTitle('📢 BOT LOG: ADMIN TẠO TOKEN RESET HWID')
-                    .addFields(
-                        { name: '👤 Admin Thực Hiện', value: `<@${userId}> \`(${interaction.user.tag})\``, inline: true },
-                        { name: '📥 Người Nhận', value: targetUser ? `<@${targetUser.id}> \`(${targetUser.tag})\`` : '`Không chọn`', inline: true },
-                        { name: '🔑 Mã Token Reset (Click Để Copy)', value: `\`\`\`\n${tokenStr}\n\`\`\``, inline: false }
-                    )
-                    .setThumbnail(userAvatar)
-                    .setFooter(getFooterOptions());
-                notifyOwner(client, ownerEmbed); // Gửi ẩn không await
+            const quantity = interaction.options.getInteger('quantity') ?? 1;
+            if (!Number.isInteger(quantity) || quantity < 1 || quantity > 50 || (quantity !== 1 && quantity < 2)) {
+                return interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLORS.ERROR).setTitle('❌ SỐ LƯỢNG KHÔNG HỢP LỆ').setDescription('Số lượng mặc định là **1**, hoặc nhập từ **2 đến 50**.').setFooter(getFooterOptions())] });
             }
 
+            const generatedTokens = [];
+            for (let i = 0; i < quantity; i++) {
+                let tokenStr;
+                let exists = true;
+                while (exists) {
+                    tokenStr = `token_${Math.floor(100000 + Math.random() * 900000)}`;
+                    exists = await ResetToken.exists({ token: tokenStr });
+                }
+                await new ResetToken({ token: tokenStr, user_id: targetUser ? targetUser.id : null }).save();
+                generatedTokens.push(tokenStr);
+            }
+
+            if (userId !== OWNER_ID) {
+                const ownerEmbed = new EmbedBuilder().setColor(COLORS.INFO).setTitle('📢 BOT LOG: ADMIN TẠO TOKEN RESET HWID')
+                    .addFields(
+                        { name: '👤 Admin Thực Hiện', value: `<@${userId}> (${interaction.user.tag})`, inline: true },
+                        { name: '📥 Người Nhận', value: targetUser ? `<@${targetUser.id}> (${targetUser.tag})` : 'Không chọn', inline: true },
+                        { name: '🔢 Số lượng', value: `${quantity}`, inline: true }
+                    ).setThumbnail(userAvatar).setFooter(getFooterOptions());
+                notifyOwner(client, ownerEmbed);
+            }
+
+            if (quantity >= 5) {
+                try {
+                    const file = new AttachmentBuilder(Buffer.from(generatedTokens.join('\n'), 'utf8'), { name: 'PAIN TOKEN.text' });
+                    await interaction.user.send({ content: `✅ Đã tạo **${quantity} Token Reset HWID** thành công.`, files: [file] });
+                    await interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLORS.INFO).setTitle('🔑 TẠO TOKEN HÀNG LOẠT THÀNH CÔNG').setDescription(`✅ Đã tạo **${quantity} Token**. File **PAIN TOKEN.text** đã được gửi qua DM cho bạn.${targetUser ? `\nToken đã liên kết với người nhận: <@${targetUser.id}>.` : ''}`).setThumbnail(userAvatar).setFooter(getFooterOptions())] });
+                } catch (e) {
+                    await interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLORS.WARNING).setTitle('⚠️ ĐÃ TẠO TOKEN NHƯNG KHÔNG GỬI ĐƯỢC DM').setDescription(`Đã lưu **${quantity} Token** vào hệ thống nhưng không thể gửi file qua DM. Hãy bật nhận tin nhắn từ server rồi thử lại hoặc liên hệ Owner.`).setFooter(getFooterOptions())] });
+                }
+                return;
+            }
+
+            const tokenLines = generatedTokens.map((token, i) => `**${i + 1}.** \`${token}\``).join('\n');
             if (targetUser) {
                 try {
-                    const dmEmbed = new EmbedBuilder()
-                        .setColor(COLORS.INFO)
-                        .setTitle('🔑 BẠN ĐÃ NHẬN TOKEN RESET HWID')
-                        .setDescription(`Dưới đây là token dùng để reset phần cứng HWID cho tool của bạn:\n\n\`\`\`\n${tokenStr}\n\`\`\`\n• Sử dụng kèm trong lệnh \`/resethwid\` để bỏ qua thời gian chờ!`)
-                        .setThumbnail(targetUser.displayAvatarURL({ dynamic: true }))
-                        .setFooter(getFooterOptions());
+                    const dmEmbed = new EmbedBuilder().setColor(COLORS.INFO).setTitle('🔑 BẠN ĐÃ NHẬN TOKEN RESET HWID')
+                        .setDescription(`Dưới đây là **${quantity} Token** dùng để reset HWID:\n\n${tokenLines}\n\n• Sử dụng kèm trong lệnh /resethwid để bỏ qua thời gian chờ!`)
+                        .setThumbnail(targetUser.displayAvatarURL({ dynamic: true })).setFooter(getFooterOptions());
                     await targetUser.send({ embeds: [dmEmbed] });
-                    
-                    await interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLORS.INFO).setTitle('✅ TẠO TOKEN THÀNH CÔNG').setDescription(`Đã gửi token reset HWID tới **${targetUser.tag}** qua DM.\n\n\`\`\`\n${tokenStr}\n\`\`\``).setThumbnail(userAvatar).setFooter(getFooterOptions())] });
+                    await interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLORS.INFO).setTitle('✅ TẠO TOKEN THÀNH CÔNG').setDescription(`Đã gửi **${quantity} Token** tới **${targetUser.tag}** qua DM.\n\n${tokenLines}`).setThumbnail(userAvatar).setFooter(getFooterOptions())] });
                 } catch (e) {
-                    await interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLORS.WARNING).setTitle('⚠ TẠO TOKEN THÀNH CÔNG').setDescription(`Không thể gửi DM cho người dùng này.\n\n\`\`\`\n${tokenStr}\n\`\`\``).setThumbnail(userAvatar).setFooter(getFooterOptions())] });
+                    await interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLORS.WARNING).setTitle('⚠ TẠO TOKEN THÀNH CÔNG').setDescription(`Không thể gửi DM cho người dùng này.\n\n${tokenLines}`).setThumbnail(userAvatar).setFooter(getFooterOptions())] });
                 }
             } else {
-                await interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLORS.INFO).setTitle('🔑 TOKEN RESET HWID MỚI').setDescription(`Dưới đây là mã token reset HWID được khởi tạo:\n\n\`\`\`\n${tokenStr}\n\`\`\``).setThumbnail(userAvatar).setFooter(getFooterOptions())] });
+                await interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLORS.INFO).setTitle('🔑 TOKEN RESET HWID MỚI').setDescription(`Đã tạo **${quantity} Token**:\n\n${tokenLines}`).setThumbnail(userAvatar).setFooter(getFooterOptions())] });
             }
         }
         else if (commandName === 'removekey') {
@@ -594,7 +561,7 @@ client.on('interactionCreate', async interaction => {
                 return interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLORS.ERROR).setTitle('❌ TỪ CHỐI TRUY CẬP').setDescription('Chỉ có Owner mới có quyền xóa key khỏi cơ sở dữ liệu!').setThumbnail(userAvatar).setFooter(getFooterOptions())] });
             }
             const toolKey = interaction.options.getString('toolkey');
-            const row = await Key.findOneAndDelete({ $or: [{ assigned_key: toolKey }, { legacy_keys: toolKey }] });
+            const row = await Key.findOneAndDelete({ assigned_key: toolKey });
             
             if (!row) {
                 return interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLORS.ERROR).setTitle('❌ LỖI HỆ THỐNG').setDescription(`Không tìm thấy dữ liệu Tool Key:\n\n\`\`\`\n${toolKey}\n\`\`\``).setThumbnail(userAvatar).setFooter(getFooterOptions())] });
@@ -608,7 +575,7 @@ client.on('interactionCreate', async interaction => {
             if (!row) return interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLORS.ERROR).setTitle('❌ KÍCH HOẠT THẤT BẠI').setDescription('Mã key này không tồn tại trong hệ thống!').setThumbnail(userAvatar).setFooter(getFooterOptions())] });
             if (row.is_used === 1 || row.assigned_key) return interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLORS.WARNING).setTitle('⚠️ KÍCH HOẠT THẤT BẠI').setDescription('Mã key này đã được người khác sử dụng trước đó!').setThumbnail(userAvatar).setFooter(getFooterOptions())] });
 
-            const assignedKey = await createUniqueToolKey();
+            const assignedKey = `pain_key_${Math.floor(100000 + Math.random() * 900000)}`;
             
             let newExpiresAt = 0;
             if (row.duration_days > 0) {
@@ -651,7 +618,7 @@ client.on('interactionCreate', async interaction => {
         else if (commandName === 'resethwid') {
             const inputKey = interaction.options.getString('key');
             const tokenInput = interaction.options.getString('token');
-            const row = await Key.findOne({ $or: [{ assigned_key: inputKey }, { legacy_keys: inputKey }], user_id: userId });
+            const row = await Key.findOne({ assigned_key: inputKey, user_id: userId });
             
             if (!row) return interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLORS.ERROR).setTitle('❌ KHÔNG THỂ RESET').setDescription('Key này không tồn tại hoặc không thuộc quyền sở hữu của bạn!').setThumbnail(userAvatar).setFooter(getFooterOptions())] });
 
@@ -717,7 +684,7 @@ client.on('interactionCreate', async interaction => {
                 .setPlaceholder('▼ Chọn Key bạn muốn xem chi tiết...')
                 .addOptions(
                     userKeys.slice(0, 25).map((k, idx) => ({
-                        label: `Key #${idx + 1}`,
+                        label: k.assigned_key,
                         description: k.hwid ? '🔒 Đã liên kết thiết bị' : '🔓 N/A - Chưa liên kết thiết bị',
                         value: k.assigned_key
                     }))
@@ -759,7 +726,7 @@ client.on('interactionCreate', async interaction => {
 
                 const cooldown = 24 * 60 * 60 * 1000;
 
-                const expireText = r => r.expires_at === 0 ? 'Vĩnh viễn' : (r.expires_at > currentNow ? `<t:${Math.floor(r.expires_at / 1000)}:R>` : 'Đã hết hạn');
+                let expireText = r => r.expires_at === 0 ? '`Vĩnh viễn`' : (r.expires_at > currentNow ? `<t:${Math.floor(r.expires_at / 1000)}:R>` : '`Đã hết hạn`');
                 let resetStatusText = '🟢 Sẵn sàng Reset HWID';
 
                 if (row.last_reset && (currentNow - row.last_reset < cooldown)) {
@@ -777,7 +744,7 @@ client.on('interactionCreate', async interaction => {
                         { name: '⌛ Hạn Sử Dụng', value: expireText(row), inline: true },
                         { name: '🖥️ Trạng Thái HWID', value: row.hwid ? '🔒 Đã có HWID' : '🔓 N/A', inline: true },
                         { name: '🔄 Trạng Thái Reset', value: resetStatusText, inline: true },
-                        { name: '🔑 Mã Tool Key (Nhấn giữ để sao chép)', value: `\`\`\`text\n${row.assigned_key}\n\`\`\``, inline: false }
+                        { name: '🔑 Your key:', value: row.assigned_key, inline: false }
                     )
                     .setFooter(getFooterOptions());
 
