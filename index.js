@@ -81,6 +81,7 @@ const Admin = mongoose.model('Admin', adminSchema);
 const keySchema = new mongoose.Schema({
     key: String,
     assigned_key: { type: String, default: null },
+    legacy_keys: { type: [String], default: [] },
     hwid: { type: String, default: null },
     expires_at: { type: Number, default: 0 },
     duration_days: { type: Number, default: 0 },
@@ -100,9 +101,62 @@ const tokenSchema = new mongoose.Schema({
 });
 const ResetToken = mongoose.model('ResetToken', tokenSchema);
 
+// Tạo Tool Key theo định dạng PAIN-XXXX-XXXX-XXXX.
+function generateToolKey() {
+    const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    let value = '';
+    while (value.length < 12) {
+        for (const byte of crypto.randomBytes(16)) {
+            value += alphabet[byte % alphabet.length];
+            if (value.length === 12) break;
+        }
+    }
+    return `PAIN-${value.slice(0, 4)}-${value.slice(4, 8)}-${value.slice(8, 12)}`;
+}
+
+async function createUniqueToolKey() {
+    for (let attempt = 0; attempt < 20; attempt++) {
+        const candidate = generateToolKey();
+        const exists = await Key.exists({
+            $or: [{ assigned_key: candidate }, { legacy_keys: candidate }]
+        });
+        if (!exists) return candidate;
+    }
+    throw new Error('Không thể tạo Tool Key duy nhất sau nhiều lần thử.');
+}
+
+// Chuyển key cũ tự động nhưng giữ alias để các bản tool đang lưu key cũ
+// vẫn xác thực được cho tới khi người dùng lấy key mới bằng /getkey.
+async function migrateLegacyToolKeys() {
+    const oldRows = await Key.find({
+        assigned_key: /^pain_key_\d{6}$/i
+    });
+
+    let migrated = 0;
+    for (const row of oldRows) {
+        const oldKey = row.assigned_key;
+        const newKey = await createUniqueToolKey();
+
+        row.legacy_keys = Array.from(new Set([...(row.legacy_keys || []), oldKey]));
+        row.assigned_key = newKey;
+        await row.save();
+        migrated++;
+        console.log(`🔁 Đã chuyển Tool Key cũ sang định dạng mới cho bản ghi ${row._id}.`);
+    }
+
+    console.log(`✅ Hoàn tất chuyển đổi Tool Key cũ: ${migrated} key.`);
+}
+
 console.log('🔄 Đang tiến hành kết nối đến MongoDB Atlas...');
 mongoose.connect(MONGODB_URI)
-    .then(() => console.log('✅ Đã kết nối MongoDB Atlas thành công!'))
+    .then(async () => {
+        console.log('✅ Đã kết nối MongoDB Atlas thành công!');
+        try {
+            await migrateLegacyToolKeys();
+        } catch (migrationError) {
+            console.error('❌ Lỗi chuyển đổi Tool Key cũ:', migrationError);
+        }
+    })
     .catch(err => console.error('❌ Lỗi kết nối MongoDB:', err));
 
 const app = express();
@@ -164,7 +218,7 @@ app.post(['/', '/api/verify'], async (req, res) => {
             return res.json({ valid: false, reason: "invalid_signature" });
         }
 
-        const row = await Key.findOne({ assigned_key: key });
+        const row = await Key.findOne({ $or: [{ assigned_key: key }, { legacy_keys: key }] });
         if (!row) return res.json({ valid: false, reason: "key_not_found" });
         if (row.expires_at !== 0 && Date.now() > row.expires_at) return res.json({ valid: false, reason: "expired" });
         
@@ -540,7 +594,7 @@ client.on('interactionCreate', async interaction => {
                 return interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLORS.ERROR).setTitle('❌ TỪ CHỐI TRUY CẬP').setDescription('Chỉ có Owner mới có quyền xóa key khỏi cơ sở dữ liệu!').setThumbnail(userAvatar).setFooter(getFooterOptions())] });
             }
             const toolKey = interaction.options.getString('toolkey');
-            const row = await Key.findOneAndDelete({ assigned_key: toolKey });
+            const row = await Key.findOneAndDelete({ $or: [{ assigned_key: toolKey }, { legacy_keys: toolKey }] });
             
             if (!row) {
                 return interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLORS.ERROR).setTitle('❌ LỖI HỆ THỐNG').setDescription(`Không tìm thấy dữ liệu Tool Key:\n\n\`\`\`\n${toolKey}\n\`\`\``).setThumbnail(userAvatar).setFooter(getFooterOptions())] });
@@ -554,7 +608,7 @@ client.on('interactionCreate', async interaction => {
             if (!row) return interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLORS.ERROR).setTitle('❌ KÍCH HOẠT THẤT BẠI').setDescription('Mã key này không tồn tại trong hệ thống!').setThumbnail(userAvatar).setFooter(getFooterOptions())] });
             if (row.is_used === 1 || row.assigned_key) return interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLORS.WARNING).setTitle('⚠️ KÍCH HOẠT THẤT BẠI').setDescription('Mã key này đã được người khác sử dụng trước đó!').setThumbnail(userAvatar).setFooter(getFooterOptions())] });
 
-            const assignedKey = `pain_key_${Math.floor(100000 + Math.random() * 900000)}`;
+            const assignedKey = await createUniqueToolKey();
             
             let newExpiresAt = 0;
             if (row.duration_days > 0) {
@@ -597,7 +651,7 @@ client.on('interactionCreate', async interaction => {
         else if (commandName === 'resethwid') {
             const inputKey = interaction.options.getString('key');
             const tokenInput = interaction.options.getString('token');
-            const row = await Key.findOne({ assigned_key: inputKey, user_id: userId });
+            const row = await Key.findOne({ $or: [{ assigned_key: inputKey }, { legacy_keys: inputKey }], user_id: userId });
             
             if (!row) return interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLORS.ERROR).setTitle('❌ KHÔNG THỂ RESET').setDescription('Key này không tồn tại hoặc không thuộc quyền sở hữu của bạn!').setThumbnail(userAvatar).setFooter(getFooterOptions())] });
 
