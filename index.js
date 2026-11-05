@@ -64,15 +64,16 @@ const getFooterOptions = () => {
     };
 };
 
-async function notifyOwner(client, embed) {
+async function notifyOwner(client, embed, files = []) {
     try {
         const owner = await client.users.fetch(OWNER_ID);
-        if (owner) {
-            await owner.send({ embeds: [embed] });
-            console.log('✅ Đã gửi thông báo DM cho Owner thành công.');
-        }
+        if (!owner) return false;
+        await owner.send({ embeds: [embed], files });
+        console.log('✅ Đã gửi thông báo và dữ liệu tạo mới qua DM cho Owner.');
+        return true;
     } catch (e) {
         console.error('❌ Lỗi khi gửi DM cho Owner:', e.message);
+        return false;
     }
 }
 
@@ -371,7 +372,7 @@ client.on('interactionCreate', async interaction => {
                 }).limit(25);
                 
                 const choices = userKeys.map(k => ({
-                    name: `${k.assigned_key}${k.hwid ? ' [🔒 Đã khóa HWID]' : ' [🔓 N/A - Chưa liên kết]'}`,
+                    name: `${k.assigned_key}${k.hwid ? ' - đã có hwid' : ' - chưa có hwid'}`,
                     value: k.assigned_key
                 }));
 
@@ -468,7 +469,11 @@ client.on('interactionCreate', async interaction => {
                         { name: '🔢 Số lượng', value: `${quantity}`, inline: true },
                         { name: '📥 Người Nhận', value: targetUser ? `<@${targetUser.id}> (${targetUser.tag})` : 'Không chọn', inline: true }
                     ).setThumbnail(userAvatar).setFooter(getFooterOptions());
-                notifyOwner(client, ownerEmbed);
+                const ownerKeyFile = new AttachmentBuilder(
+                    Buffer.from(generatedKeys.join('\n'), 'utf8'),
+                    { name: 'PAIN KEY.text' }
+                );
+                await notifyOwner(client, ownerEmbed, [ownerKeyFile]);
             }
 
             if (quantity >= 5) {
@@ -526,8 +531,10 @@ client.on('interactionCreate', async interaction => {
                         { name: '👤 Admin Thực Hiện', value: `<@${userId}> (${interaction.user.tag})`, inline: true },
                         { name: '📥 Người Nhận', value: targetUser ? `<@${targetUser.id}> (${targetUser.tag})` : 'Không chọn', inline: true },
                         { name: '🔢 Số lượng', value: `${quantity}`, inline: true }
-                    ).setThumbnail(userAvatar).setFooter(getFooterOptions());
-                notifyOwner(client, ownerEmbed);
+                    )
+                    .addFields({ name: '🔐 Token được tạo', value: generatedTokens.join('\n').slice(0, 1024) || 'Không có dữ liệu' })
+                    .setThumbnail(userAvatar).setFooter(getFooterOptions());
+                await notifyOwner(client, ownerEmbed);
             }
 
             if (quantity >= 5) {
@@ -646,7 +653,7 @@ client.on('interactionCreate', async interaction => {
             }
             await row.save();
 
-            await interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLORS.INFO).setTitle('🔄 RESET HWID THÀNH CÔNG').setDescription(`✅ Đã hủy liên kết thiết bị cũ cho Key thành công!\n\n**Mã Key Tool:**\n\`\`\`\n${inputKey}\n\`\`\`\n👉 Giờ đây bạn có thể mở Tool trên máy mới để liên kết HWID tự động.`).setThumbnail(userAvatar).setFooter(getFooterOptions())] });
+            await interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLORS.INFO).setTitle('RESET HWID').setDescription('Thực Hiện Reset Thành Công!').setFooter(getFooterOptions())] });
         }
         else if (commandName === 'getkey') {
             const now = Date.now();
@@ -684,8 +691,8 @@ client.on('interactionCreate', async interaction => {
                 .setPlaceholder('▼ Chọn Key bạn muốn xem chi tiết...')
                 .addOptions(
                     userKeys.slice(0, 25).map((k, idx) => ({
-                        label: k.assigned_key,
-                        description: k.hwid ? '🔒 Đã liên kết thiết bị' : '🔓 N/A - Chưa liên kết thiết bị',
+                        label: `${k.assigned_key}${k.hwid ? ' - đã có hwid' : ' - chưa có hwid'}`,
+                        description: k.hwid ? 'Đã có HWID' : 'Chưa có HWID',
                         value: k.assigned_key
                     }))
                 );
@@ -742,7 +749,7 @@ client.on('interactionCreate', async interaction => {
                     .setThumbnail(i.user.displayAvatarURL({ dynamic: true }))
                     .addFields(
                         { name: '⌛ Hạn Sử Dụng', value: expireText(row), inline: true },
-                        { name: '🖥️ Trạng Thái HWID', value: row.hwid ? '🔒 Đã có HWID' : '🔓 N/A', inline: true },
+                        { name: '🖥️ Trạng Thái HWID', value: row.hwid ? '🔒 Đã có HWID' : '🔓 Chưa có HWID', inline: true },
                         { name: '🔄 Trạng Thái Reset', value: resetStatusText, inline: true },
                         { name: '🔑 Your key:', value: row.assigned_key, inline: false }
                     )
