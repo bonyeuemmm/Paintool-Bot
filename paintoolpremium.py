@@ -75,7 +75,11 @@ SCREENSHOT_PATH = "/sdcard/pain_screenshot.png"
 DISCORD_LINK = "https://discord.gg/z7RUNArBuJ"
 
 # ---- Khóa AI: 1 khóa chính + 4 khóa phụ ----
-# >>> Dán khóa vào giữa hai dấu nháy tương ứng (không chia sẻ file có khóa) <<<
+# >>> KHÔNG tự sửa các chuỗi "PASTE_KEY_x_HERE" bên dưới. <<<
+# Server (/api/verify trong index.js) tự tìm đúng các chuỗi này và thay bằng
+# khóa Cohere thật lấy từ biến môi trường COHERE_API_KEY_0..4 trên server,
+# mỗi khi người dùng xác thực license thành công. Đổi chuỗi ở đây sẽ làm
+# bước thay thế trên server thất bại âm thầm, khóa không được chèn vào.
 AI_KEYS_INLINE = [
     "PASTE_KEY_1_HERE",   # khóa chính
     "PASTE_KEY_2_HERE",   # khóa phụ 1
@@ -2240,12 +2244,12 @@ def check_license_curl(key):
 
     except subprocess.TimeoutExpired:
         LAST_LICENSE_REASON = "network"
-        print("[!] Thất bại: Kết nối bị timeout (>45s).")
+        # Không print trực tiếp ở đây — màu đỏ/vàng được caller (authenticate) áp dụng
+        # và hiển thị trong license_screen(); in thẳng ở đây sẽ ra chữ không màu, lặp thông báo.
         return False, "[!] Thất bại: Kết nối bị timeout (>45s)."
 
     except Exception as e:
         LAST_LICENSE_REASON = "server_error"
-        print(f"[!] Thất bại: Lỗi hệ thống ({str(e)})")
         return False, f"[!] Thất bại: Lỗi hệ thống ({str(e)})"
 
 def license_screen(hwid, note=None):
@@ -3038,7 +3042,7 @@ def send_detailed_alert(level, title, description, pkg=None, reason=None, action
                 "text": f"PAIN TOOL {VERSION} • Alert System",
                 "icon_url": "https://i.postimg.cc/gJbhCmHL/Pain-Gamer.png"
             },
-            "timestamp": datetime.now(timezone.utc).isoformat() + "Z",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
         }
 
         payload_dict = {
@@ -3195,7 +3199,7 @@ def build_status_embed(packages):
                 "text": f"PAIN TOOL {VERSION} • Báo cáo định kỳ 5 phút",
                 "icon_url": "https://i.postimg.cc/gJbhCmHL/Pain-Gamer.png",
             },
-            "timestamp": datetime.now(timezone.utc).isoformat() + "Z",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
         }
         return embed_obj
     except Exception as e:
@@ -7639,11 +7643,11 @@ def menu_low_graphics():
         print(f"Cài đặt: {C.WHT}{gfx_settings_label()}{C.R}   Tự áp dụng khi Start: {C.WHT}{'Bật' if GFX_AUTO else 'Tắt'}{C.R}")
         print(f" {C.GRY}Sửa file {GFX_FILE} của từng tab. Tab đang chạy sẽ bị tắt để áp dụng.{C.R}")
         print(f"{C.LPUR}[1]{C.R} {C.WHT}Áp dụng tất cả tab{C.R}")
-        print(f"{C.LPUR}[2]{C.R} {C.WHT}Đồ họa thấp nhất [{'Bật' if GFX_LOW else 'Tắt'}]{C.R}")
+        print(f"{C.LPUR}[2]{C.R} {C.WHT}Đồ họa thấp nhất [{f'{C.GRN}Bật{C.R}' if GFX_LOW else f'{C.GRY}Tắt{C.R}'}]{C.R}")
         print(f"{C.LPUR}[3]{C.R} {C.WHT}Giới hạn FPS [{GFX_FPS if GFX_FPS else 'Không giới hạn'}]{C.R}")
         print(f"{C.LPUR}[4]{C.R} {C.WHT}Khôi phục gốc{C.R}")
         print(f"{C.LPUR}[5]{C.R} {C.WHT}Xem trạng thái các tab{C.R}")
-        print(f"{C.LPUR}[6]{C.R} {C.WHT}Tự áp dụng khi Start [{'Bật' if GFX_AUTO else 'Tắt'}]{C.R}")
+        print(f"{C.LPUR}[6]{C.R} {C.WHT}Tự áp dụng khi Start [{f'{C.GRN}Bật{C.R}' if GFX_AUTO else f'{C.GRY}Tắt{C.R}'}]{C.R}")
         print(f"{C.RED}[0] Quay lại{C.R}")
         sub = input("Chọn: ").strip()
         if sub == "0":
@@ -9795,8 +9799,8 @@ def menu_screen_guard():
         print(f" {C.GRY}• Trắng/đen kẹt {WB_CONFIRM_COUNT} lần liên tiếp -> kill-process rồi vào lại ngay, không chờ timeout.{C.R}")
         print(f" {C.GRY}• Not Responding (ANR) hoặc khung hình đứng im {OVERLAY_FREEZE_SEC}s + không có log -> kill-process rồi chạy lại.{C.R}")
         print(f" {C.GRY}Hiện tại: {screen_guard_label()}{C.R}\n")
-        print(f"{C.LPUR}[1]{C.R} {C.WHT}Màn hình trắng/đen [{'Bật' if WB_DETECT else 'Tắt'}]{C.R}")
-        print(f"{C.LPUR}[2]{C.R} {C.WHT}Not Responding / GUI đứng [{'Bật' if OVERLAY_DETECT else 'Tắt'}]{C.R}")
+        print(f"{C.LPUR}[1]{C.R} {C.WHT}Màn hình trắng/đen [{f'{C.GRN}Bật{C.R}' if WB_DETECT else f'{C.GRY}Tắt{C.R}'}]{C.R}")
+        print(f"{C.LPUR}[2]{C.R} {C.WHT}Not Responding / GUI đứng [{f'{C.GRN}Bật{C.R}' if OVERLAY_DETECT else f'{C.GRY}Tắt{C.R}'}]{C.R}")
         print(f"{C.LPUR}[3]{C.R} {C.WHT}Thử quét ngay{C.R}")
         print(f"{C.RED}[0] Quay lại menu Set up{C.R}")
         sub = input("Chọn: ").strip()
@@ -10141,24 +10145,25 @@ def menu_setup():
         section_title("SET UP")
         print(f"{C.LPUR}[1]{C.R} {C.WHT}Auto rejoin{C.R}")
         print(f"{C.LPUR}[2]{C.R} {C.WHT}Chọn game{C.R}")
-        print(f"{C.LPUR}[3]{C.R} {C.WHT}Auto Clear Data [{'Bật' if AUTO_CLEAR_DATA else 'Tắt'}]{C.R}")
-        print(f"{C.LPUR}[4]{C.R} {C.WHT}Auto Backup [{'Bật' if AUTO_BACKUP else 'Tắt'}]{C.R}")
-        print(f"{C.LPUR}[5]{C.R} {C.WHT}Cảnh báo RAM [{'Bật' if LOW_RAM_ALERT else 'Tắt'}]{C.R}")
+        print(f"{C.LPUR}[3]{C.R} {C.WHT}Auto Clear Data [{f'{C.GRN}Bật{C.R}' if AUTO_CLEAR_DATA else f'{C.GRY}Tắt{C.R}'}]{C.R}")
+        print(f"{C.LPUR}[4]{C.R} {C.WHT}Auto Backup [{f'{C.GRN}Bật{C.R}' if AUTO_BACKUP else f'{C.GRY}Tắt{C.R}'}]{C.R}")
+        print(f"{C.LPUR}[5]{C.R} {C.WHT}Cảnh báo RAM [{f'{C.GRN}Bật{C.R}' if LOW_RAM_ALERT else f'{C.GRY}Tắt{C.R}'}]{C.R}")
         print(f"{C.LPUR}[6]{C.R} {C.WHT}Profile [{len(PROFILES)}]{C.R}")
         print(f"{C.LPUR}[7]{C.R} {C.WHT}Tìm kiếm package{C.R}")
-        print(f"{C.LPUR}[8]{C.R} {C.WHT}Hẹn giờ [{'Bật' if (SCHEDULE.get('start') or SCHEDULE.get('stop')) else 'Tắt'}]{C.R}")
+        print(f"{C.LPUR}[8]{C.R} {C.WHT}Hẹn giờ [{f'{C.GRN}Bật{C.R}' if (SCHEDULE.get('start') or SCHEDULE.get('stop')) else f'{C.GRY}Tắt{C.R}'}]{C.R}")
         print(f"{C.LPUR}[9]{C.R} {C.WHT}Graphics Optimizer [{gfx_settings_label()}]{C.R}")
         print(f"{C.LPUR}[10]{C.R} {C.WHT}Biệt danh tab [{len(ALIASES)}]{C.R}")
-        print(f"{C.LPUR}[11]{C.R} {C.WHT}Kiểm tra mạng [{'Bật' if NET_CHECK else 'Tắt'}]{C.R}")
+        print(f"{C.LPUR}[11]{C.R} {C.WHT}Kiểm tra mạng [{f'{C.GRN}Bật{C.R}' if NET_CHECK else f'{C.GRY}Tắt{C.R}'}]{C.R}")
         print(f"{C.LPUR}[12]{C.R} {C.WHT}Lịch restart [{auto_restart_label()}]{C.R}")
         print(f"{C.LPUR}[13]{C.R} {C.WHT}Key Injector [{key_label()}]{C.R}")
         print(f"{C.LPUR}[14]{C.R} {C.WHT}Màn hình trắng/đen [{screen_guard_label()}]{C.R}")
         print(f"{C.LPUR}[15]{C.R} {C.WHT}Server Hop [{hop_label()}]{C.R}")
-        print(f"{C.LPUR}[16]{C.R} {C.WHT}Pain AI{C.R}")
-        print(f"{C.LPUR}[17]{C.R} {C.WHT}Giờ im lặng [{'Bật' if QUIET_HOURS.get('enabled') else 'Tắt'}]{C.R}")
-        print(f"{C.LPUR}[18]{C.R} {C.WHT}Giới hạn thời gian [{'Bật' if STOP_TIMER.get('enabled') else 'Tắt'}]{C.R}")
-        print(f"{C.LPUR}[19]{C.R} {C.WHT}Chỉ theo dõi [{'Bật' if MONITOR_ONLY else 'Tắt'}]{C.R}")
-        print(f"{C.LPUR}[20]{C.R} {C.WHT}Lưu ảnh lỗi nặng [{'Bật' if SCREEN_ARCHIVE.get('enabled') else 'Tắt'}]{C.R}")
+        _ai_on = AI_SETTINGS.get('analysis')
+        print(f"{C.LPUR}[16]{C.R} {C.WHT}Pain AI [{f'{C.GRN}Bật{C.R}' if _ai_on else f'{C.GRY}Tắt{C.R}'}]{C.R}")
+        print(f"{C.LPUR}[17]{C.R} {C.WHT}Giờ im lặng [{f'{C.GRN}Bật{C.R}' if QUIET_HOURS.get('enabled') else f'{C.GRY}Tắt{C.R}'}]{C.R}")
+        print(f"{C.LPUR}[18]{C.R} {C.WHT}Giới hạn thời gian [{f'{C.GRN}Bật{C.R}' if STOP_TIMER.get('enabled') else f'{C.GRY}Tắt{C.R}'}]{C.R}")
+        print(f"{C.LPUR}[19]{C.R} {C.WHT}Chỉ theo dõi [{f'{C.GRN}Bật{C.R}' if MONITOR_ONLY else f'{C.GRY}Tắt{C.R}'}]{C.R}")
+        print(f"{C.LPUR}[20]{C.R} {C.WHT}Lưu ảnh lỗi nặng [{f'{C.GRN}Bật{C.R}' if SCREEN_ARCHIVE.get('enabled') else f'{C.GRY}Tắt{C.R}'}]{C.R}")
         print(f"{C.LPUR}[21]{C.R} {C.WHT}Set up cấu hình{C.R}")
         print(f"{C.RED}[0] Quay lại{C.R}")
         sub = input("Chọn: ").strip()
@@ -11083,10 +11088,18 @@ def verify_and_start():
 
 
 def menu_autostart_boot():
-    """Thiết lập tự động start tool khi UgPhone / Termux khởi động lại (yêu cầu Termux:Boot)"""
+    """Thiết lập tự động start tool khi UgPhone / Termux khởi động lại (yêu cầu Termux:Boot).
+    Tự nhận diện đang chạy dạng file .py thường, hay dạng module Cython (.so) đã import
+    (lúc đó sys.argv[0] không trỏ tới file thật, phải chạy qua python3 -c import)."""
     BOOT_DIR  = os.path.join(os.path.expanduser("~"), ".termux", "boot")
     BOOT_SCRIPT = os.path.join(BOOT_DIR, "painstart.sh")
-    TOOL_PATH = os.path.abspath(sys.argv[0])
+
+    # __file__ của module này: .py khi chạy thường, .so khi đã biên dịch bằng Cython
+    _this_file = os.path.abspath(globals().get("__file__", "") or os.path.abspath(sys.argv[0]))
+    _is_compiled = _this_file.endswith(".so")
+    MODULE_NAME = os.path.splitext(os.path.basename(_this_file))[0].split(".")[0]
+    MODULE_DIR = os.path.dirname(_this_file)
+    TOOL_PATH = os.path.abspath(sys.argv[0])  # giữ cho trường hợp .py (hiển thị, không dùng khi compiled)
 
     def _is_enabled():
         return os.path.isfile(BOOT_SCRIPT)
@@ -11128,11 +11141,19 @@ def menu_autostart_boot():
                     msg_err("Không thể tạo thư mục boot. Hãy cài Termux:Boot và thử lại.")
                     wait_enter()
                     continue
+                if _is_compiled:
+                    # Module đã biên dịch (Cython .so): import rồi gọi thẳng verify_and_start(),
+                    # không chạy qua "python3 file.so" vì đó không phải script Python đọc được trực tiếp.
+                    run_line = f'python3 -c "import {MODULE_NAME}; {MODULE_NAME}.verify_and_start()" &'
+                    cd_dir = MODULE_DIR
+                else:
+                    run_line = f'python3 "{TOOL_PATH}" &'
+                    cd_dir = os.path.dirname(TOOL_PATH)
                 script_content = f"""#!/data/data/com.termux/files/usr/bin/bash
 # PAIN TOOL — Auto-start script (tạo bởi tool)
 sleep 5
-cd "{os.path.dirname(TOOL_PATH)}"
-python3 "{TOOL_PATH}" &
+cd "{cd_dir}"
+{run_line}
 """
                 try:
                     with open(BOOT_SCRIPT, "w", encoding="utf-8") as f:
@@ -11143,6 +11164,8 @@ python3 "{TOOL_PATH}" &
                     print(f" {C.GRY}1. Đảm bảo Termux:Boot đã được cài từ F-Droid hoặc Play Store.{C.R}")
                     print(f" {C.GRY}2. Mở Termux:Boot ít nhất 1 lần để kích hoạt.{C.R}")
                     print(f" {C.GRY}3. Key sẽ được tự động nhập vì đã lưu từ lần đăng nhập trước.{C.R}")
+                    if _is_compiled:
+                        print(f" {C.GRY}4. Chạy qua: python3 -c \"import {MODULE_NAME}; ...\" — module .so phải nằm trong: {MODULE_DIR}{C.R}")
                 except Exception as e:
                     msg_err(f"Không tạo được script: {e}")
             wait_enter()

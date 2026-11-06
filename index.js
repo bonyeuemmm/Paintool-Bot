@@ -40,6 +40,30 @@ const COHERE_KEYS = {
     4: process.env.COHERE_API_KEY_4 || null,
 };
 
+// Log trạng thái load key lúc khởi động (che bớt key, không in ra toàn bộ)
+const maskKey = (k) => {
+    if (!k || !k.trim()) return null;
+    const v = k.trim();
+    return v.length <= 8 ? '****' : `${v.slice(0, 4)}...${v.slice(-4)}`;
+};
+(() => {
+    const loaded = [];
+    const missing = [];
+    for (let i = 0; i < 5; i++) {
+        const masked = maskKey(COHERE_KEYS[i]);
+        if (masked) loaded.push(`#${i}: ${masked}`);
+        else missing.push(`#${i}`);
+    }
+    if (loaded.length) {
+        console.log(`✅ [COHERE] Đã load ${loaded.length}/5 key: ${loaded.join(', ')}`);
+    } else {
+        console.warn('⚠️ [COHERE] Không có key nào được load — kiểm tra lại biến môi trường COHERE_API_KEY_0..4.');
+    }
+    if (missing.length) {
+        console.log(`ℹ️ [COHERE] Chưa đặt: ${missing.join(', ')}`);
+    }
+})();
+
 const CLIENT_ID = process.env.CLIENT_ID;
 const MONGODB_URI = process.env.MONGODB_URI || process.env.MONGO_URI;
 const OWNER_ID = '1208450889246048306';
@@ -184,11 +208,8 @@ app.post(['/', '/api/verify'], async (req, res) => {
 
         const rawCode = await fs.promises.readFile(premiumFilePath, 'utf8');
 
-        // Lấy key từ Render tự động thay thế vào vị trí đại diện
-        const groqKey = process.env.GROQ_API_KEY || "";
-        let updatedCode = rawCode.replace("MY_GROQ_KEY_PLACEHOLDER", () => groqKey);
-
-        // Thay các khóa Cohere trong code bằng biến COHERE_API_KEY_0..4 trên Render
+        // Thay các khóa Cohere trong code bằng biến COHERE_API_KEY_0..4 trên server
+        let updatedCode = rawCode;
         for (let i = 0; i < 5; i++) {
             const k = COHERE_KEYS[i];
             if (k && k.trim()) {
