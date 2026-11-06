@@ -127,6 +127,54 @@ keySchema.index({ key: 1 }, { unique: true });
 keySchema.index({ assigned_key: 1 }, { unique: true, partialFilterExpression: { assigned_key: { $type: 'string' } } });
 const Key = mongoose.model('Key', keySchema);
 
+// Tự động chuyển Tool Key cũ sang định dạng PAIN-XXXX-XXXX-XXXX khi bot khởi động.
+// Chỉ cập nhật assigned_key; key gốc dùng để redeem và các dữ liệu khác được giữ nguyên.
+const TOOL_KEY_FORMAT = /^PAIN-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}$/;
+function generateToolKey() {
+    const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+    const parts = Array.from({ length: 3 }, () =>
+        Array.from({ length: 4 }, () => alphabet[crypto.randomInt(0, alphabet.length)]).join('')
+    );
+    return `PAIN-${parts.join('-')}`;
+}
+
+async function migrateLegacyAssignedKeys() {
+    try {
+        const legacyRows = await Key.find({
+            assigned_key: { $type: 'string', $ne: '' }
+        }).select('_id key assigned_key').lean();
+
+        let migrated = 0;
+        for (const row of legacyRows) {
+            if (TOOL_KEY_FORMAT.test(row.assigned_key)) continue;
+
+            let newAssignedKey;
+            let exists = true;
+            while (exists) {
+                newAssignedKey = generateToolKey();
+                exists = !!(await Key.exists({ assigned_key: newAssignedKey }));
+            }
+
+            const result = await Key.updateOne(
+                { _id: row._id, assigned_key: row.assigned_key },
+                { $set: { assigned_key: newAssignedKey } }
+            );
+            if (result.modifiedCount === 1) {
+                migrated++;
+                await writeAudit({
+                    action: 'TOOL_KEY_FORMAT_MIGRATED',
+                    key_value: row.key,
+                    details: { old_assigned_key: row.assigned_key, assigned_key: newAssignedKey }
+                });
+            }
+        }
+
+        console.log(`✅ [KEY MIGRATION] Đã chuyển ${migrated} Tool Key cũ sang định dạng mới.`);
+    } catch (err) {
+        console.error('❌ [KEY MIGRATION] Không thể chuyển Tool Key cũ:', err.message);
+    }
+}
+
 const tokenSchema = new mongoose.Schema({
     token: { type: String, required: true, unique: true },
     user_id: { type: String, default: null },
@@ -161,7 +209,11 @@ const adminOnly = (builder) => builder.setDefaultMemberPermissions(0n);
 
 console.log('🔄 Đang tiến hành kết nối đến MongoDB Atlas...');
 mongoose.connect(MONGODB_URI)
-    .then(() => { console.log('✅ Đã kết nối MongoDB Atlas thành công!'); backupDatabase(); })
+    .then(async () => {
+        console.log('✅ Đã kết nối MongoDB Atlas thành công!');
+        await migrateLegacyAssignedKeys();
+        backupDatabase();
+    })
     .catch(err => console.error('❌ Lỗi kết nối MongoDB:', err));
 
 const app = express();
@@ -320,7 +372,7 @@ const commands = [
     new SlashCommandBuilder().setName('resethwid').setDescription('Thực hiện Reset HWID cho Key')
         .addStringOption(opt => opt.setName('key').setDescription('Chọn key cần reset').setRequired(true).setAutocomplete(true))
         .addStringOption(opt => opt.setName('token').setDescription('Token cấp phép (Tùy chọn)').setRequired(false)),
-    new SlashCommandBuilder().setName('redeem').setDescription('Kích hoạt Key kích hoạt 12 số')
+    new SlashCommandBuilder().setName('redeem').setDescription('Kích hoạt Key bản quyền')
         .addStringOption(opt => opt.setName('key').setDescription('Nhập mã key kích hoạt').setRequired(true)),
     adminOnly(new SlashCommandBuilder().setName('tokeninfo').setDescription('Admin: Kiểm tra trạng thái Token')
         .addStringOption(opt => opt.setName('token').setDescription('Token cần kiểm tra').setRequired(true))),
@@ -877,14 +929,11 @@ client.on('interactionCreate', async interaction => {
             if (row.blacklisted_until && row.blacklisted_until > Date.now()) return interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLORS.ERROR).setTitle('⛔ KEY ĐANG BỊ KHÓA').setDescription('Key này đang nằm trong danh sách blacklist.').setFooter(getFooterOptions())] });
             if (row.is_used === 1 || row.assigned_key) return interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLORS.WARNING).setTitle('⚠️ KÍCH HOẠT THẤT BẠI').setDescription('Mã key này đã được người khác sử dụng trước đó!').setThumbnail(userAvatar).setFooter(getFooterOptions())] });
 
-            // Tạo Tool Key theo định dạng PAIN-XXXX-XXXX-XXXX và kiểm tra trùng trong database.
+            // Chỉ đổi định dạng Tool Key được cấp sau khi redeem.
             let assignedKey;
             let assignedKeyExists = true;
             while (assignedKeyExists) {
-                const keyParts = Array.from({ length: 3 }, () =>
-                    crypto.randomBytes(2).toString('hex').toUpperCase()
-                );
-                assignedKey = `PAIN-${keyParts.join('-')}`;
+                assignedKey = generateToolKey();
                 assignedKeyExists = await Key.exists({ assigned_key: assignedKey });
             }
 
