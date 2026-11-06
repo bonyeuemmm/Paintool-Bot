@@ -331,7 +331,17 @@ const commands = [
         .addStringOption(opt => opt.setName('key').setDescription('Key gốc hoặc Tool Key').setRequired(true))),
     adminOnly(new SlashCommandBuilder().setName('blacklist').setDescription('Admin: Khóa Key theo thời hạn')
         .addStringOption(opt => opt.setName('key').setDescription('Key gốc hoặc Tool Key').setRequired(true))
-        .addStringOption(opt => opt.setName('duration').setDescription('Thời gian: 1h, 1d, 1m... hoặc unlock để mở khóa ngay').setRequired(true)))
+        .addStringOption(opt => opt.setName('duration').setDescription('Thời gian: 1h, 1d, 1m... hoặc unlock để mở khóa ngay').setRequired(true))),
+    adminOnly(new SlashCommandBuilder().setName('backupcheck').setDescription('Admin: Kiểm tra các bản sao lưu')),
+    adminOnly(new SlashCommandBuilder().setName('backuprestore').setDescription('Owner: Khôi phục bản sao lưu gần nhất')),
+    adminOnly(new SlashCommandBuilder().setName('adminperm').setDescription('Owner: Cấp hoặc gỡ quyền Admin')
+        .addStringOption(opt => opt.setName('action').setDescription('Thao tác').setRequired(true).addChoices({name:'Cấp Admin',value:'add'},{name:'Gỡ Admin',value:'remove'}))
+        .addUserOption(opt => opt.setName('user').setDescription('Người dùng').setRequired(true))),
+    adminOnly(new SlashCommandBuilder().setName('adminlist').setDescription('Admin: Danh sách Admin')),
+    adminOnly(new SlashCommandBuilder().setName('adminstats').setDescription('Admin: Thống kê hệ thống')),
+    adminOnly(new SlashCommandBuilder().setName('keystats').setDescription('Admin: Thống kê Key')),
+    adminOnly(new SlashCommandBuilder().setName('searchkey').setDescription('Admin: Tìm Key theo mã hoặc Discord UID')
+        .addStringOption(opt => opt.setName('query').setDescription('Key gốc, Tool Key hoặc Discord UID').setRequired(true)))
 ];
 
 const rest = new REST({ version: '10' }).setToken(TOKEN);
@@ -454,18 +464,26 @@ async function backupDatabase() {
 client.once('ready', async () => {
     try {
         const appId = CLIENT_ID || client.user.id;
-        
-        const guilds = client.guilds.cache.map(g => g.id);
-        for (const guildId of guilds) {
-            try {
-                await rest.put(Routes.applicationGuildCommands(appId, guildId), { body: [] });
-            } catch (err) {}
+        // Dùng Guild Commands để cập nhật tức thì và đặt quyền hiển thị theo từng Owner/Admin.
+        // Mặc định các lệnh quản trị yêu cầu Administrator; user Admin trong DB được cấp override riêng.
+        await rest.put(Routes.applicationCommands(appId), { body: [] });
+        for (const guild of client.guilds.cache.values()) {
+            const registered = await rest.put(Routes.applicationGuildCommands(appId, guild.id), { body: commands });
+            const admins = await Admin.find({}, { user_id: 1, _id: 0 }).lean();
+            const allowedUsers = [...new Set([OWNER_ID, ...admins.map(a => a.user_id).filter(Boolean)])];
+            const adminNames = new Set(['tokeninfo','keyhistory','keyinfo','blacklist','backupcheck','backuprestore','adminperm','adminlist','adminstats','keystats','searchkey']);
+            for (const cmd of registered) {
+                if (!adminNames.has(cmd.name)) continue;
+                const permissions = allowedUsers.map(id => ({ id, type: 1, permission: true }));
+                try {
+                    await rest.put(Routes.applicationCommandPermissions(appId, guild.id, cmd.id), { body: { permissions } });
+                } catch (permErr) {
+                    console.error(`[COMMAND PERMISSIONS] Không thể đặt quyền cho /${cmd.name} tại guild ${guild.id}:`, permErr.message);
+                }
+            }
         }
-
-        await rest.put(Routes.applicationCommands(appId), { body: commands });
-        console.log(`🌐 Đã đăng ký thành công Slash Commands Toàn Cầu (Global)!`);
+        console.log('🌐 Đã đăng ký Slash Commands theo từng Server và đồng bộ quyền Owner/Admin.');
         console.log(`✅ Bot Discord đã sẵn sàng hoạt động: ${client.user.tag}`);
-        
         checkExpiredKeys();
         setInterval(checkExpiredKeys, 60 * 1000);
         setInterval(backupDatabase, 24 * 60 * 60 * 1000);
@@ -532,6 +550,60 @@ client.on('interactionCreate', async interaction => {
     }
 
     try {
+        const adminCommands = ['tokeninfo','keyhistory','keyinfo','blacklist','backupcheck','backuprestore','adminperm','adminlist','adminstats','keystats','searchkey'];
+        if (adminCommands.includes(commandName) && !(await isSystemAdmin(userId))) {
+            return interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLORS.ERROR).setTitle('❌ TỪ CHỐI TRUY CẬP').setDescription('Chỉ Owner hoặc Admin hệ thống mới được sử dụng lệnh này.').setFooter(getFooterOptions())] });
+        }
+        if (commandName === 'adminperm') {
+            if (userId !== OWNER_ID) return interaction.editReply({ content: 'Chỉ Owner mới được quản lý quyền Admin.' });
+            const target = interaction.options.getUser('user');
+            const action = interaction.options.getString('action');
+            if (action === 'add') await Admin.findOneAndUpdate({user_id:target.id},{user_id:target.id},{upsert:true});
+            else await Admin.deleteOne({user_id:target.id});
+            await interaction.editReply({ content: action === 'add' ? `Đã cấp quyền Admin cho <@${target.id}>.` : `Đã gỡ quyền Admin của <@${target.id}>.` });
+            // Cập nhật quyền hiển thị lệnh ngay trong server hiện tại.
+            const appId = CLIENT_ID || client.user.id;
+            const guildCommands = await rest.get(Routes.applicationGuildCommands(appId, interaction.guildId));
+            const admins = await Admin.find({}, {user_id:1,_id:0}).lean();
+            const allowed = [...new Set([OWNER_ID, ...admins.map(a=>a.user_id).filter(Boolean)])];
+            const restricted = new Set(['tokeninfo','keyhistory','keyinfo','blacklist','backupcheck','backuprestore','adminperm','adminlist','adminstats','keystats','searchkey']);
+            for (const c of guildCommands.filter(c=>restricted.has(c.name))) await rest.put(Routes.applicationCommandPermissions(appId, interaction.guildId, c.id), {body:{permissions:allowed.map(id=>({id,type:1,permission:true}))}});
+            return;
+        }
+        if (commandName === 'adminlist') {
+            const rows = await Admin.find({}, {user_id:1,_id:0}).lean();
+            return interaction.editReply({ content: `**Owner:** <@${OWNER_ID}>\n**Admin (${rows.length}):**\n${rows.length ? rows.map((a,i)=>`${i+1}. <@${a.user_id}>`).join('\n') : 'Chưa có Admin.'}` });
+        }
+        if (commandName === 'adminstats') {
+            const [admins, keys, tokens, logs] = await Promise.all([Admin.countDocuments(),Key.countDocuments(),ResetToken.countDocuments(),AuditLog.countDocuments()]);
+            return interaction.editReply({ embeds:[new EmbedBuilder().setColor(COLORS.INFO).setTitle('📊 THỐNG KÊ QUẢN TRỊ').addFields({name:'Admin',value:String(admins),inline:true},{name:'Key',value:String(keys),inline:true},{name:'Token',value:String(tokens),inline:true},{name:'Audit Log',value:String(logs),inline:true}).setFooter(getFooterOptions())] });
+        }
+        if (commandName === 'keystats') {
+            const [total, active, unused, blacklisted, expired] = await Promise.all([Key.countDocuments(),Key.countDocuments({is_used:1,expires_at:0}),Key.countDocuments({is_used:0}),Key.countDocuments({blacklisted_until:{$gt:Date.now()}}),Key.countDocuments({is_used:1,expires_at:{$ne:0,$lt:Date.now()}})]);
+            return interaction.editReply({ embeds:[new EmbedBuilder().setColor(COLORS.INFO).setTitle('📊 THỐNG KÊ KEY').addFields({name:'Tổng Key',value:String(total),inline:true},{name:'Đang hoạt động',value:String(active),inline:true},{name:'Chưa kích hoạt',value:String(unused),inline:true},{name:'Blacklist',value:String(blacklisted),inline:true},{name:'Hết hạn',value:String(expired),inline:true}).setFooter(getFooterOptions())] });
+        }
+        if (commandName === 'searchkey') {
+            const q = interaction.options.getString('query').trim();
+            const rows = await Key.find({$or:[{key:q},{assigned_key:q},{user_id:q}]}).limit(10).lean();
+            if (!rows.length) return interaction.editReply({content:'Không tìm thấy Key phù hợp.'});
+            const lines = rows.map((r,i)=>`${i+1}. ${r.assigned_key || r.key} | User: ${r.user_id || 'Chưa gán'} | ${r.is_used ? 'Đã kích hoạt' : 'Chưa kích hoạt'}`);
+            return interaction.editReply({content:lines.join('\n')});
+        }
+        if (commandName === 'backupcheck') {
+            const names = (await fs.promises.readdir(BACKUP_DIR).catch(()=>[])).filter(n=>/^pain-db-.*\.json\.gz$/.test(n)).sort().reverse();
+            const checks=[];
+            for (const name of names.slice(0,10)) { try { const buf=await fs.promises.readFile(path.join(BACKUP_DIR,name)); const data=JSON.parse(zlib.gunzipSync(buf).toString('utf8')); checks.push(`✅ ${name} — ${Object.keys(data.collections||{}).length} collections`); } catch { checks.push(`❌ ${name} — lỗi/không đọc được`); } }
+            return interaction.editReply({content:`**Backup tìm thấy:** ${names.length}\n${checks.join('\n') || 'Chưa có bản Backup.'}`});
+        }
+        if (commandName === 'backuprestore') {
+            if (userId !== OWNER_ID) return interaction.editReply({content:'Chỉ Owner mới được khôi phục Backup.'});
+            const names=(await fs.promises.readdir(BACKUP_DIR)).filter(n=>/^pain-db-.*\.json\.gz$/.test(n)).sort().reverse();
+            if (!names.length) return interaction.editReply({content:'Không tìm thấy bản Backup để khôi phục.'});
+            const data=JSON.parse(zlib.gunzipSync(await fs.promises.readFile(path.join(BACKUP_DIR,names[0]))).toString('utf8'));
+            const db=mongoose.connection.db;
+            for (const [name, docs] of Object.entries(data.collections||{})) { if (!['admins','keys','resettokens','auditlogs'].includes(name) || !Array.isArray(docs)) continue; await db.collection(name).deleteMany({}); if (docs.length) await db.collection(name).insertMany(docs); }
+            return interaction.editReply({content:`Đã khôi phục dữ liệu từ Backup mới nhất: **${names[0]}**.`});
+        }
         if (commandName === 'setadmin') {
             if (userId !== OWNER_ID) {
                 return interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLORS.ERROR).setTitle('❌ TỪ CHỐI TRUY CẬP').setDescription('Chỉ có Owner tối cao mới có quyền quản lý Admin!').setThumbnail(userAvatar).setFooter(getFooterOptions())] });
@@ -548,7 +620,16 @@ client.on('interactionCreate', async interaction => {
                 const embed = new EmbedBuilder().setColor(COLORS.PURPLE).setTitle('🛡️ CẬP NHẬT TRẠNG THÁI ADMIN').setDescription(`✅ Đã gỡ bỏ quyền **Admin** của người dùng:\n• **User:** <@${target.id}> (${target.tag})`).setThumbnail(userAvatar).setFooter(getFooterOptions());
                 await interaction.editReply({ embeds: [embed] });
             }
-        } 
+            // Đồng bộ quyền nhìn thấy lệnh quản trị ngay sau khi cấp/gỡ Admin.
+            const appId = CLIENT_ID || client.user.id;
+            const guildCommands = await rest.get(Routes.applicationGuildCommands(appId, interaction.guildId));
+            const admins = await Admin.find({}, { user_id: 1, _id: 0 }).lean();
+            const allowed = [...new Set([OWNER_ID, ...admins.map(a => a.user_id).filter(Boolean)])];
+            const restricted = new Set(['tokeninfo','keyhistory','keyinfo','blacklist','backupcheck','backuprestore','adminperm','adminlist','adminstats','keystats','searchkey']);
+            for (const c of guildCommands.filter(c => restricted.has(c.name))) {
+                await rest.put(Routes.applicationCommandPermissions(appId, interaction.guildId, c.id), { body: { permissions: allowed.map(id => ({ id, type: 1, permission: true })) } });
+            }
+        }
         else if (commandName === 'createkey') {
             const isAdmin = await Admin.exists({ user_id: userId });
             if (!isAdmin && userId !== OWNER_ID) {
@@ -604,18 +685,29 @@ client.on('interactionCreate', async interaction => {
                 return;
             }
 
-            const keyLines = generatedKeys.map((key, i) => `**${i + 1}.**\n\`\`\`\n${key}\n\`\`\``).join('\n\n');
+            const keyFields = generatedKeys.map((key, i) => ({
+                name: `🔑 Key ${i + 1}`,
+                value: `\`\`\`\n${key}\n\`\`\``,
+                inline: false
+            }));
             if (targetUser) {
                 try {
                     const dmEmbed = new EmbedBuilder().setColor(COLORS.GOLD).setTitle('🎉 BẠN ĐÃ NHẬN ĐƯỢC KEY BẢN QUYỀN')
-                        .setDescription(`Quản trị viên đã gửi cho bạn **${quantity} Key** kích hoạt tool premium.\n\n${keyLines}\n\n• **Thời hạn:** ${duration === 0 ? 'Vĩnh viễn' : `${duration} ngày`}\n👉 Dùng lệnh /redeem để kích hoạt.`).setFooter(getFooterOptions());
+                        .setDescription(`Quản trị viên đã gửi cho bạn **${quantity} Key** kích hoạt tool premium.\n\n• **Thời hạn:** ${duration === 0 ? 'Vĩnh viễn' : `${duration} ngày`}\n👉 Dùng lệnh /redeem để kích hoạt.`)
+                        .addFields(keyFields).setFooter(getFooterOptions());
                     await targetUser.send({ embeds: [dmEmbed] });
-                    await interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLORS.GOLD).setTitle('🎟️ KHỞI TẠO KEY THÀNH CÔNG').setDescription(`✅ Đã tạo **${quantity} Key** và gửi qua DM cho **${targetUser.tag}**.\n\n${keyLines}`).setFooter(getFooterOptions())] });
+                    await interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLORS.GOLD).setTitle('🎟️ KHỞI TẠO KEY THÀNH CÔNG')
+                        .setDescription(`✅ Đã tạo **${quantity} Key** và gửi qua DM cho **${targetUser.tag}**.`)
+                        .addFields(keyFields).setFooter(getFooterOptions())] });
                 } catch (e) {
-                    await interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLORS.WARNING).setTitle('⚠️ TẠO KEY THÀNH CÔNG').setDescription(`Không thể gửi DM cho **${targetUser.tag}**. Các Key đã được tạo:\n\n${keyLines}`).setFooter(getFooterOptions())] });
+                    await interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLORS.WARNING).setTitle('⚠️ TẠO KEY THÀNH CÔNG')
+                        .setDescription(`Không thể gửi DM cho **${targetUser.tag}**. Các Key đã được tạo:`)
+                        .addFields(keyFields).setFooter(getFooterOptions())] });
                 }
             } else {
-                await interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLORS.GOLD).setTitle('🎟️ KHỞI TẠO KEY THÀNH CÔNG').setDescription(`✅ Đã tạo **${quantity} Key** kích hoạt:\n\n${keyLines}\n\n• **Thời hạn:** ${duration === 0 ? 'Vĩnh viễn' : `${duration} ngày`}`).setFooter(getFooterOptions())] });
+                await interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLORS.GOLD).setTitle('🎟️ KHỞI TẠO KEY THÀNH CÔNG')
+                    .setDescription(`✅ Đã tạo **${quantity} Key** kích hoạt.\n\n• **Thời hạn:** ${duration === 0 ? 'Vĩnh viễn' : `${duration} ngày`}`)
+                    .addFields(keyFields).setFooter(getFooterOptions())] });
             }
         }
         else if (commandName === 'gettoken') {
@@ -668,18 +760,29 @@ client.on('interactionCreate', async interaction => {
                 return;
             }
 
-            const tokenLines = generatedTokens.map((token, i) => `**${i + 1}.**\n\`\`\`\n${token}\n\`\`\``).join('\n\n');
+            const tokenFields = generatedTokens.map((token, i) => ({
+                name: `🔐 Token ${i + 1}`,
+                value: `\`\`\`\n${token}\n\`\`\``,
+                inline: false
+            }));
             if (targetUser) {
                 try {
                     const dmEmbed = new EmbedBuilder().setColor(COLORS.INFO).setTitle('🔑 BẠN ĐÃ NHẬN TOKEN RESET HWID')
-                        .setDescription(`Dưới đây là **${quantity} Token** dùng để reset HWID:\n\n${tokenLines}\n\n• Sử dụng kèm trong lệnh /resethwid để bỏ qua thời gian chờ!`).setFooter(getFooterOptions());
+                        .setDescription(`Dưới đây là **${quantity} Token** dùng để reset HWID:\n\n• Sử dụng kèm trong lệnh /resethwid để bỏ qua thời gian chờ!`)
+                        .addFields(tokenFields).setFooter(getFooterOptions());
                     await targetUser.send({ embeds: [dmEmbed] });
-                    await interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLORS.INFO).setTitle('✅ TẠO TOKEN THÀNH CÔNG').setDescription(`Đã gửi **${quantity} Token** tới **${targetUser.tag}** qua DM.\n\n${tokenLines}`).setFooter(getFooterOptions())] });
+                    await interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLORS.INFO).setTitle('✅ TẠO TOKEN THÀNH CÔNG')
+                        .setDescription(`Đã gửi **${quantity} Token** tới **${targetUser.tag}** qua DM.`)
+                        .addFields(tokenFields).setFooter(getFooterOptions())] });
                 } catch (e) {
-                    await interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLORS.WARNING).setTitle('⚠ TẠO TOKEN THÀNH CÔNG').setDescription(`Không thể gửi DM cho người dùng này.\n\n${tokenLines}`).setFooter(getFooterOptions())] });
+                    await interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLORS.WARNING).setTitle('⚠ TẠO TOKEN THÀNH CÔNG')
+                        .setDescription('Không thể gửi DM cho người dùng này. Token đã được tạo:')
+                        .addFields(tokenFields).setFooter(getFooterOptions())] });
                 }
             } else {
-                await interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLORS.INFO).setTitle('🔑 TOKEN RESET HWID MỚI').setDescription(`Đã tạo **${quantity} Token**:\n\n${tokenLines}`).setFooter(getFooterOptions())] });
+                await interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLORS.INFO).setTitle('🔑 TOKEN RESET HWID MỚI')
+                    .setDescription(`Đã tạo **${quantity} Token**:`)
+                    .addFields(tokenFields).setFooter(getFooterOptions())] });
             }
         }
         else if (['tokeninfo', 'keyhistory', 'keyinfo', 'blacklist'].includes(commandName)) {
