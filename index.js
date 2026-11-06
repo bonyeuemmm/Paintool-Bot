@@ -324,6 +324,7 @@ const commands = [
         .addStringOption(opt => opt.setName('key').setDescription('Nhập mã key kích hoạt').setRequired(true)),
     adminOnly(new SlashCommandBuilder().setName('tokeninfo').setDescription('Admin: Kiểm tra trạng thái Token')
         .addStringOption(opt => opt.setName('token').setDescription('Token cần kiểm tra').setRequired(true))),
+    adminOnly(new SlashCommandBuilder().setName('tokenstats').setDescription('Admin: Thống kê Token')) ,
     adminOnly(new SlashCommandBuilder().setName('keyhistory').setDescription('Admin: Xem lịch sử Key')
         .addStringOption(opt => opt.setName('key').setDescription('Key gốc hoặc Tool Key (để trống xem gần đây)').setRequired(false))),
     adminOnly(new SlashCommandBuilder().setName('keyinfo').setDescription('Admin: Xem thông tin Key')
@@ -333,9 +334,6 @@ const commands = [
         .addStringOption(opt => opt.setName('duration').setDescription('Thời gian: 1h, 1d, 1m... hoặc unlock để mở khóa ngay').setRequired(true))),
     adminOnly(new SlashCommandBuilder().setName('backupcheck').setDescription('Admin: Kiểm tra các bản sao lưu')),
     adminOnly(new SlashCommandBuilder().setName('backuprestore').setDescription('Owner: Khôi phục bản sao lưu gần nhất')),
-    adminOnly(new SlashCommandBuilder().setName('adminperm').setDescription('Owner: Cấp hoặc gỡ quyền Admin')
-        .addStringOption(opt => opt.setName('action').setDescription('Thao tác').setRequired(true).addChoices({name:'Cấp Admin',value:'add'},{name:'Gỡ Admin',value:'remove'}))
-        .addUserOption(opt => opt.setName('user').setDescription('Người dùng').setRequired(true))),
     adminOnly(new SlashCommandBuilder().setName('adminlist').setDescription('Admin: Danh sách Admin')),
     adminOnly(new SlashCommandBuilder().setName('adminstats').setDescription('Admin: Thống kê hệ thống')),
     adminOnly(new SlashCommandBuilder().setName('keystats').setDescription('Admin: Thống kê Key')),
@@ -550,18 +548,30 @@ client.on('interactionCreate', async interaction => {
     }
 
     try {
-        const adminCommands = ['tokeninfo','keyhistory','keyinfo','blacklist','backupcheck','backuprestore','adminperm','adminlist','adminstats','keystats','searchkey'];
+        const adminCommands = ['tokeninfo','keyhistory','keyinfo','blacklist','backupcheck','backuprestore','adminlist','adminstats','keystats','searchkey'];
         if (adminCommands.includes(commandName) && !(await isSystemAdmin(userId))) {
             return interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLORS.ERROR).setTitle('❌ TỪ CHỐI TRUY CẬP').setDescription('Chỉ Owner hoặc Admin hệ thống mới được sử dụng lệnh này.').setFooter(getFooterOptions())] });
         }
-        if (commandName === 'adminperm') {
-            if (userId !== OWNER_ID) return interaction.editReply({ content: 'Chỉ Owner mới được quản lý quyền Admin.' });
-            const target = interaction.options.getUser('user');
-            const action = interaction.options.getString('action');
-            if (action === 'add') await Admin.findOneAndUpdate({user_id:target.id},{user_id:target.id},{upsert:true});
-            else await Admin.deleteOne({user_id:target.id});
-            await interaction.editReply({ content: action === 'add' ? `Đã cấp quyền Admin cho <@${target.id}>.` : `Đã gỡ quyền Admin của <@${target.id}>.` });
-            return;
+        if (commandName === 'tokenstats') {
+            const [total, used, unused, assigned, unassigned] = await Promise.all([
+                ResetToken.countDocuments(),
+                ResetToken.countDocuments({ is_used: true }),
+                ResetToken.countDocuments({ is_used: false }),
+                ResetToken.countDocuments({ user_id: { $ne: null, $exists: true } }),
+                ResetToken.countDocuments({ $or: [{ user_id: null }, { user_id: { $exists: false } }] })
+            ]);
+            const embed = new EmbedBuilder()
+                .setColor(COLORS.INFO)
+                .setTitle('📊 THỐNG KÊ TOKEN')
+                .addFields(
+                    { name: 'Tổng Token', value: String(total), inline: true },
+                    { name: 'Đã sử dụng', value: String(used), inline: true },
+                    { name: 'Chưa sử dụng', value: String(unused), inline: true },
+                    { name: 'Đã gán User', value: String(assigned), inline: true },
+                    { name: 'Chưa gán User', value: String(unassigned), inline: true }
+                )
+                .setFooter(getFooterOptions());
+            return interaction.editReply({ embeds: [embed] });
         }
         if (commandName === 'adminlist') {
             const rows = await Admin.find({}, {user_id:1,_id:0}).lean();
