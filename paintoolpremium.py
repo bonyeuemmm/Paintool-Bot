@@ -152,6 +152,7 @@ LAUNCH_VERIFY_SECONDS = 30
 LAUNCH_MAX_RETRY = 3
 MAP_LOAD_WAIT = 15
 RETRY_COUNTDOWN_SECONDS = 5
+MULTITASK_RESET_MAX = 1       # sau LAUNCH_MAX_RETRY lần vào Map thất bại: tự tắt Đa nhiệm rồi thử lại (số đợt tối đa)
 LOG_STATE = {}
 LOGCAT_BASELINE = {}
 LAST_ACTIVITY = {}
@@ -279,7 +280,7 @@ def diagnose_tab(pkg):
     elif not running:
         verdict = "App đã tắt. Tool sẽ mở lại ở lần giám sát tiếp theo."
     elif not link:
-        verdict = "Chưa có link hoặc ID game cho package này. Kiểm tra Set up mục 2 và mục 3."
+        verdict = "Chưa có link hoặc ID game cho package này. Kiểm tra Set up mục 2."
     elif code_hit in ("267", "268"):
         verdict = f"Server từ chối vào (mã {code_hit}). Thử đổi server hoặc kiểm tra link VIP còn hiệu lực."
     elif code_hit == "277":
@@ -2139,6 +2140,13 @@ def check_license_curl(key):
     """
     global LAST_LICENSE_EXPIRES, LAST_LICENSE_REASON
 
+    # Định dạng key mới do PAIN TOOL BOT phát hành: PAIN-XXXX-XXXX-XXXX.
+    # Chuẩn hóa chữ thường thành chữ hoa và bỏ khoảng trắng khi người dùng dán key.
+    key = str(key or "").strip().upper()
+    if not re.fullmatch(r"PAIN-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}", key):
+        LAST_LICENSE_REASON = "invalid_key_format"
+        return False, "Key không đúng định dạng mới! Định dạng hợp lệ: PAIN-XXXX-XXXX-XXXX."
+
     error_map = {
         "missing_data": "Dữ liệu gửi lên không đủ!",
         "missing_key": "Key không được để trống!",
@@ -2352,11 +2360,17 @@ def authenticate():
         license_screen(hwid, note)
         note = None
         input_key = ask("Nhập Key:").strip()
-        
+
         if input_key.lower() in ("exit", "0"):
             exit_tool()
-        
+
         if not input_key:
+            continue
+
+        # Chấp nhận key mới không phân biệt chữ hoa/thường, gửi lên server dạng chuẩn.
+        input_key = input_key.upper()
+        if not re.fullmatch(r"PAIN-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}", input_key):
+            note = f"{C.RED}[!] Key sai định dạng. Hãy nhập theo mẫu: PAIN-XXXX-XXXX-XXXX.{C.R}"
             continue
 
         is_valid, response_text = with_spinner("Đang kết nối máy chủ", check_license_curl, input_key)
@@ -3039,8 +3053,7 @@ def send_detailed_alert(level, title, description, pkg=None, reason=None, action
             "color": style["color"],
             "fields": fields,
             "footer": {
-                "text": f"PAIN TOOL {VERSION} • Alert System",
-                "icon_url": "https://i.postimg.cc/gJbhCmHL/Pain-Gamer.png"
+                "text": f"PAIN TOOL {VERSION} • Alert System"
             },
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
@@ -3095,24 +3108,12 @@ def handle_send_text():
             time.sleep(1)
             return
 
-        _uid_raw = input("Nhập UID tài khoản Discord (Enter = ping @everyone): ").strip()
-        discord_id = ""
-        if _uid_raw:
-            discord_id = parse_discord_uid(_uid_raw) or ""
-            if not discord_id:
-                msg_warn("UID không hợp lệ (cần 17–20 chữ số, hoặc dạng <@id>). Sẽ ping @everyone.")
         now = datetime.now()
         footer_text = "MADE BY PAIN"
-
-        user_tag_str = f"<@{discord_id}>" if discord_id else "Ẩn danh"
-        uid_str = discord_id if discord_id else "Không có"
 
         description_text = (
             f"Bạn có nội dung gửi từ PAIN TOOL REJOIN VIP ({VERSION})\n\n"
             f"{content_input}\n\n"
-            "👤 Thông tin người gửi:\n"
-            f"• Tên người dùng: {user_tag_str}\n"
-            f"• UID: {uid_str}\n\n"
             "🕐 Thời gian gửi:\n"
             f"{now.strftime('%d/%m/%Y lúc %H:%M:%S')}"
         )
@@ -3122,7 +3123,6 @@ def handle_send_text():
             "avatar_url": "https://i.postimg.cc/gJbhCmHL/Pain-Gamer.png",
             "embeds": [{"description": description_text, "footer": {"text": footer_text}, "color": 65280}]
         }
-        embed_data["content"] = "@everyone" + (f" <@{discord_id}>" if discord_id else "")
 
         msg_info("Đang gửi nội dung lên Discord...")
         try:
@@ -3516,7 +3516,30 @@ def retry_countdown(pkg, why):
     print("\033[0m")
     return False
 
-def join_map(pkg, hard=False):
+_JOIN_EXHAUSTED = object()   # tín hiệu: đã hết LAUNCH_MAX_RETRY lần vào Map mà chưa thành công
+
+def is_pkg_in_map(pkg):
+    """Tự kiểm tra tab đã ở trong Map chưa trước khi vào lại (tránh gửi lệnh thừa gây lỗi).
+    Điều kiện: app đang chạy, cửa sổ đang hiển thị, log mới không báo lỗi,
+    và có dấu hiệu đã vào Map (đánh dấu lúc join hoặc log có JOIN_MARKERS)."""
+    if not is_app_running(pkg) or not is_app_in_foreground(pkg):
+        return False
+    text = read_new_log_text(pkg)
+    text2 = read_new_logcat_text(pkg)
+    if scan_text_for_problem(text)[0] or scan_text_for_problem(text2, check_crash=True)[0]:
+        return False
+    low = (text + "\n" + text2).lower()
+    return pkg in JOINED_AT or any(m in low for m in JOIN_MARKERS)
+
+def reset_multitask(pkg):
+    """Tắt Đa nhiệm của một tab: force-stop để gỡ khỏi danh sách đa nhiệm, xóa trạng thái cũ."""
+    close_game(pkg)
+    JOINED_AT.pop(pkg, None)
+    LAST_SOFT_JOIN.pop(pkg, None)
+
+def _join_attempts(pkg, hard=False):
+    """Thử vào Map tối đa LAUNCH_MAX_RETRY lần. Trả về True/False khi kết thúc có kết quả,
+    hoặc _JOIN_EXHAUSTED khi đã thử hết mà vẫn chưa vào được."""
     for attempt in range(1, LAUNCH_MAX_RETRY + 1):
         if stop_start:
             return False
@@ -3524,6 +3547,11 @@ def join_map(pkg, hard=False):
             stopped, _down = wait_for_network(pkg)
             if stopped:
                 return False
+        # Kiểm tra trước khi vào: nếu tab đã ở trong Map (vd. vào được trong lúc đếm ngược) thì không gửi lệnh nữa
+        if (attempt > 1 or not hard) and is_pkg_in_map(pkg):
+            JOINED_AT[pkg] = time.time()
+            print(f"\033[1;32m[+] {tab_label(pkg)} đã ở trong Map, bỏ qua lệnh vào lại.\033[0m")
+            return True
         print(f"\033[1;33m[*] Vào Map {tab_label(pkg)} (lần {attempt}/{LAUNCH_MAX_RETRY})...\033[0m")
         open_game(pkg, hard=(hard or attempt > 1))
 
@@ -3557,9 +3585,27 @@ def join_map(pkg, hard=False):
         if attempt < LAUNCH_MAX_RETRY and retry_countdown(pkg, "Tab không vào lại được game"):
             return False
 
-    print(f"\033[1;31m[!] Không vào được Map {tab_label(pkg)} sau {LAUNCH_MAX_RETRY} lần.\033[0m")
-    update_ban_tracker(rejoin_failed=True)  # Track rejoin failure
-    return False
+    return _JOIN_EXHAUSTED
+
+def join_map(pkg, hard=False):
+    result = _join_attempts(pkg, hard)
+    resets = 0
+    while result is _JOIN_EXHAUSTED and resets < MULTITASK_RESET_MAX and not stop_start:
+        resets += 1
+        print(f"\033[1;33m[!] {tab_label(pkg)}: {LAUNCH_MAX_RETRY} lần vào Map đều thất bại. "
+              f"Đếm ngược {RETRY_COUNTDOWN_SECONDS}s rồi tự tắt Đa nhiệm và thử lại (đợt {resets}/{MULTITASK_RESET_MAX})...\033[0m")
+        log_event("WARN", pkg, f"{LAUNCH_MAX_RETRY} lần vào Map thất bại, tự tắt Đa nhiệm rồi thử lại (đợt {resets})")
+        if retry_countdown(pkg, f"{LAUNCH_MAX_RETRY} lần vào Map không thành công"):
+            return False
+        reset_multitask(pkg)
+        result = _join_attempts(pkg, hard=True)
+
+    if result is _JOIN_EXHAUSTED:
+        print(f"\033[1;31m[!] Không vào được Map {tab_label(pkg)} sau {LAUNCH_MAX_RETRY} lần"
+              f"{f' và {resets} lần tự tắt Đa nhiệm' if resets else ''}.\033[0m")
+        update_ban_tracker(rejoin_failed=True)  # Track rejoin failure
+        return False
+    return bool(result)
 
 # ==================== PHÁT HIỆN KICK / VĂNG / CRASH ====================
 _CODE_REGEXES = [
@@ -5739,14 +5785,11 @@ def show_banner():
         ("10", "Backup"),
         ("11", "Cookie Roblox"),
         ("12", "Xem log"),
-        ("13", "Thống kê"),
-        ("14", "Hồ sơ theo game"),
-        ("15", "Gán executor"),
-        ("16", "Ban Tracking Stats"),
-        ("17", "Anti-AFK"),
-        ("18", "Nghe nhạc"),
-        ("19", "Dừng khẩn cấp"),
-        ("20", "Tự động start"),
+        ("13", "Gán executor"),
+        ("14", "Anti-AFK"),
+        ("15", "Nghe nhạc"),
+        ("16", "Dừng khẩn cấp"),
+        ("17", "Cài đặt"),
         ("0", "Exit"),
     ]
 
@@ -6715,6 +6758,25 @@ def _is_youtube_url(url):
     low = url.lower()
     return low.startswith(("https://", "http://")) and ("youtube.com/" in low or "youtu.be/" in low)
 
+def _ytdlp_youtube_bypass_args():
+    """Tham số giúp né bước 'Sign in to confirm you're not a bot' của YouTube.
+    Giả lập client Android (không cần đăng nhập). Nếu có file cookie
+    (~/.pain_music_cookies.txt, export từ trình duyệt đã đăng nhập YouTube)
+    thì dùng thêm cookie đó để tăng tỉ lệ thành công."""
+    args = ["--extractor-args", "youtube:player_client=android"]
+    cookie_path = os.path.join(os.path.expanduser("~"), ".pain_music_cookies.txt")
+    if os.path.isfile(cookie_path):
+        args += ["--cookies", cookie_path]
+    return args
+
+def _music_fail_reason(reason):
+    """Thêm gợi ý tiếng Việt khi gặp đúng lỗi 'not a bot' của YouTube."""
+    if "sign in to confirm" in reason.lower() or "not a bot" in reason.lower():
+        return (f"{reason[:160]} — YouTube chặn vì nghi ngờ bot (hay gặp với IP máy chủ/cloud). "
+                f"Tool đã tự thử bằng client Android, nếu vẫn lỗi: lưu cookie đã đăng nhập YouTube "
+                f"(xuất từ trình duyệt) vào ~/.pain_music_cookies.txt rồi thử lại.")
+    return reason[:160]
+
 def music_play(url):
     """Phát âm thanh của link YouTube ở nền. Trả về (ok, thông_tin)."""
     import subprocess
@@ -6722,10 +6784,17 @@ def music_play(url):
         return False, "link không phải YouTube (cần youtube.com hoặc youtu.be)"
     music_stop()
     ytdlp = _ytdlp_cmd()
+    bypass = _ytdlp_youtube_bypass_args()
     err_path = os.path.join(os.path.expanduser("~"), ".pain_music_err.txt")
     if shutil.which("mpv"):
         # mpv gọi yt-dlp để lấy luồng âm thanh; chỉ phát video đầu tiên, bỏ qua playlist
-        cmd = ["mpv", "--no-video", "--msg-level=all=error", "--ytdl-raw-options=no-playlist="]
+        # ytdl_raw_options truyền thẳng tham số cho yt-dlp bên trong mpv (dạng key=value, nối bằng ,)
+        raw_opts = "no-playlist=,extractor-args=youtube:player_client=android"
+        cookie_path = os.path.join(os.path.expanduser("~"), ".pain_music_cookies.txt")
+        if os.path.isfile(cookie_path):
+            raw_opts += f",cookies={cookie_path}"
+        cmd = ["mpv", "--no-video", "--msg-level=all=error",
+               f"--script-opts=ytdl_hook-ytdl_raw_options={raw_opts}"]
         if ytdlp and len(ytdlp) == 1:
             cmd.append("--script-opts=ytdl_hook-ytdl_path=" + ytdlp[0])
         cmd.append(url)
@@ -6734,7 +6803,7 @@ def music_play(url):
         audio = os.path.join(os.path.expanduser("~"), ".pain_music.m4a")
         try:
             dl = subprocess.run(ytdlp + ["-f", "bestaudio[ext=m4a]/bestaudio", "--no-playlist", "--no-part",
-                                         "--force-overwrites", "-o", audio, url],
+                                         "--force-overwrites"] + bypass + ["-o", audio, url],
                                 capture_output=True, text=True, encoding="utf-8", errors="replace",
                                 timeout=600, stdin=subprocess.DEVNULL)
         except subprocess.TimeoutExpired:
@@ -6742,7 +6811,7 @@ def music_play(url):
         if dl.returncode != 0 or not os.path.exists(audio):
             tail = [x.strip() for x in (dl.stderr or "").splitlines() if x.strip()]
             reason = tail[-1] if tail else "không rõ lý do"
-            return False, f"yt-dlp không tải được âm thanh ({reason[:160]})"
+            return False, f"yt-dlp không tải được âm thanh ({_music_fail_reason(reason)})"
         try:
             res = subprocess.run(["termux-media-player", "play", audio], capture_output=True, text=True,
                                  encoding="utf-8", errors="replace", timeout=20, stdin=subprocess.DEVNULL)
@@ -9115,14 +9184,11 @@ MENU_NAMES = {
     "10": "Backup", 
     "11": "Cookie Roblox", 
     "12": "Xem log",
-    "13": "Thống kê", 
-    "14": "Hồ sơ theo game", 
-    "15": "Gán executor",
-    "16": "Ban Tracking Stats", 
-    "17": "Anti-AFK",
-    "18": "Nghe nhạc",
-    "19": "Dừng khẩn cấp",
-    "20": "Tự động start",
+    "13": "Gán executor",
+    "14": "Anti-AFK",
+    "15": "Nghe nhạc",
+    "16": "Dừng khẩn cấp",
+    "17": "Cài đặt",
     "0": "Thoát",
 }
 
@@ -9222,17 +9288,105 @@ def _package_label(pkg):
     alias_str = f" {C.GRY}({alias}){C.R}" if alias else ""
     return f"{pkg}{alias_str}{tag}"
 
+_PICK_RX = re.compile(r"^[\d\s,\-]+$")   # chuỗi chỉ gồm số, khoảng trắng, dấu phẩy, gạch nối
+
+def _parse_pick_numbers(text, max_n):
+    """'1' -> [1]; '1 2' -> [1, 2]; '3-6' -> [3, 4, 5, 6]. Bỏ các số ngoài khoảng 1..max_n."""
+    nums = set()
+    for tok in re.split(r"[\s,]+", text.strip()):
+        if not tok:
+            continue
+        if "-" in tok:
+            a, _, b = tok.partition("-")
+            if a.isdigit() and b.isdigit():
+                lo, hi = sorted((int(a), int(b)))
+                nums.update(range(lo, hi + 1))
+        elif tok.isdigit():
+            nums.add(int(tok))
+    return sorted(n for n in nums if 1 <= n <= max_n)
+
+def _toggle_pick(text, shown, selected):
+    """Bật/tắt chọn các package theo số nhập vào (số theo danh sách đang hiện). Trả về thông báo ngắn."""
+    nums = _parse_pick_numbers(text, len(shown))
+    if not nums:
+        return "Không có số hợp lệ trong danh sách đang hiện"
+    added, removed = [], []
+    for n in nums:
+        pkg = shown[n - 1]
+        if pkg in selected:
+            selected.discard(pkg)
+            removed.append(n)
+        else:
+            selected.add(pkg)
+            added.append(n)
+    parts = []
+    if added:
+        parts.append("chọn " + ", ".join(map(str, added)))
+    if removed:
+        parts.append("bỏ chọn " + ", ".join(map(str, removed)))
+    return "✓ " + " · ".join(parts) + f" (đang chọn {len(selected)})"
+
+def _copy_selected(packages, selected):
+    """Copy các package đã chọn, mỗi dòng một tên, theo thứ tự danh sách. Trả về (ok, danh sách)."""
+    chosen = [p for p in packages if p in selected]
+    return copy_to_clipboard("\n".join(chosen)), chosen
+
 def _pkg_picker_fallback(pkgs):
-    """Khi stdin không phải terminal: chỉ hiện danh sách, không chạm được."""
-    clear_screen()
-    section_title("TÌM KIẾM PACKAGE")
-    for i, pkg in enumerate(pkgs, 1):
-        print(f"  {i:3}. {_package_label(pkg)}")
-    wait_enter()
+    """Khi stdin không phải terminal: vẫn chọn bằng cách nhập số, từng dòng một."""
+    selected = set()
+    msg = ""
+    while True:
+        clear_screen()
+        section_title("TÌM KIẾM PACKAGE")
+        for i, pkg in enumerate(pkgs, 1):
+            box = f"{C.GRN}[√]{C.R}" if pkg in selected else f"{C.GRY}[ ]{C.R}"
+            print(f" {box} {i:4}. {_package_label(pkg)}")
+        print(f"\n {C.GRY}Đã chọn: {len(selected)} · Nhập số để chọn/bỏ chọn (vd: 1 · 1 2 · 3-6){C.R}")
+        print(f" {C.GRY}Enter trống: copy đã chọn · a: chọn hết · x: bỏ hết · 0: thoát{C.R}")
+        if msg:
+            print(f" {msg}")
+        try:
+            cmd = input(f"{C.WHT}Nhập:{C.R} ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+        msg = ""
+        if cmd == "0":
+            return
+        if cmd == "x":
+            selected.clear()
+            msg = "Đã bỏ chọn tất cả"
+            continue
+        if cmd == "a":
+            selected.update(pkgs)
+            msg = f"Đã chọn {len(pkgs)} package"
+            continue
+        if cmd == "":
+            if not selected:
+                msg = f"{C.YEL}Chưa chọn package nào.{C.R}"
+                continue
+            ok, chosen = _copy_selected(pkgs, selected)
+            if ok:
+                msg = f"{C.GRN}✓ Đã copy {len(chosen)} package vào clipboard{C.R}"
+            else:
+                msg = f"{C.YEL}Không copy được (cần Termux:API hoặc xclip). Danh sách đã chọn:{C.R}\n " + "\n ".join(chosen)
+            continue
+        if _PICK_RX.match(cmd) and any(c.isdigit() for c in cmd):
+            msg = _toggle_pick(cmd, pkgs, selected)
+            continue
+        msg = f"{C.YEL}Chỉ nhập số (vd: 1 · 1 2 · 3-6), a, x, Enter trống hoặc 0.{C.R}"
+
+def _skip_escape(fd):
+    """Bỏ qua chuỗi phím đặc biệt (mũi tên, Home...) đã bắt đầu bằng ESC."""
+    for _ in range(32):
+        nxt = os.read(fd, 1)
+        if not nxt or (0x40 <= nxt[0] <= 0x7e and nxt != b"["):
+            break
 
 def search_packages_by_keyword():
-    """Danh sách toàn bộ package. Chạm vào tên package để copy.
-    Gõ chữ để lọc, +/- hoặc cuộn để đổi trang, Enter để thoát."""
+    """Tìm kiếm package: danh sách đánh số, mỗi dòng có ô [√] khi đã chọn.
+    Gõ số rồi Enter để chọn/bỏ chọn (vd: 1, 1 2, 3-6). Enter trống để copy các package đã chọn.
+    Gõ chữ rồi Enter để lọc. a: chọn hết đang hiện, x: bỏ hết, +/- đổi trang, 0: thoát."""
     import termios, tty
     packages = list_all_packages()
     if not packages:
@@ -9244,10 +9398,12 @@ def search_packages_by_keyword():
         _pkg_picker_fallback(packages)
         return
 
-    HEADER_ROWS = 4
+    HEADER_ROWS = 6   # tiêu đề, gạch, thống kê, 3 dòng hướng dẫn
+    FOOTER_ROWS = 3   # gạch, ô nhập, thông báo
     fd = sys.stdin.fileno()
     old_attr = termios.tcgetattr(fd)
-    state = {"filt": "", "offset": 0, "msg": ""}
+    state = {"filt": "", "offset": 0, "msg": "", "buf": "", "inited": False, "copy_fail": None}
+    selected = set()
 
     # Load app labels nền — không block UI
     def _preload_labels():
@@ -9280,7 +9436,11 @@ def search_packages_by_keyword():
 
     def page_size():
         lines, _ = term_size()
-        return max(3, lines - HEADER_ROWS - 4)
+        return max(3, lines - HEADER_ROWS - FOOTER_ROWS - 1)
+
+    def page(step_dir):
+        ps = page_size()
+        state["offset"] = max(0, state["offset"] + (ps if step_dir > 0 else -ps))
 
     def draw():
         lines, cols = term_size()
@@ -9289,34 +9449,44 @@ def search_packages_by_keyword():
         state["offset"] = max(0, min(state["offset"], max(0, len(shown) - ps)))
         pages = max(1, -(-len(shown) // ps))
         cur_page = state["offset"] // ps + 1
+        rule = f"{C.GRY}{'─' * max(10, min(cols - 1, 60))}{C.R}"
+        filt_part = f" · Lọc: {state['filt']}" if state["filt"] else ""
         rows = [
             f"{C.WHT}TÌM KIẾM PACKAGE{C.R}",
-            f"{C.GRY}{'─' * max(10, min(cols - 1, 60))}{C.R}",
-            f"{C.GRY}Tổng {len(packages)} · Hiện {len(shown)} · Trang {cur_page}/{pages}{C.R}",
-            f"{C.GRY}Chạm để copy · Gõ để lọc · +/- đổi trang · Enter thoát{C.R}",
+            rule,
+            f"{C.GRY}Tổng {len(packages)} · Hiện {len(shown)} · {C.R}{C.GRN}Đã chọn {len(selected)}{C.R}"
+            f"{C.GRY} · Trang {cur_page}/{pages}{filt_part}{C.R}",
+            f"{C.GRY}Gõ số + Enter để chọn/bỏ chọn (vd: 1 · 1 2 · 3-6){C.R}",
+            f"{C.GRY}Enter trống: copy đã chọn · Gõ chữ + Enter: lọc · *: bỏ lọc{C.R}",
+            f"{C.GRY}a: chọn hết đang hiện · x: bỏ hết · +/-: đổi trang · 0: thoát{C.R}",
         ]
-        width = max(10, cols - 6)
+        width = max(10, cols - 12)   # chừa chỗ cho "[√] " và số thứ tự
         for r in range(ps):
             idx = state["offset"] + r
-            if idx < len(shown):
-                pkg = shown[idx]
-                label = _APP_LABEL_CACHE.get(pkg, "")
-                label_part = f" [{label}]" if label and label != pkg else ""
-                text = pkg if len(pkg) <= width else pkg[:width - 1] + "…"
-                alias = ALIASES.get(pkg, "")
-                alias_part = f" ({alias})" if alias else ""
-                tag = " [prefix]" if PACKAGE_PREFIX and pkg.startswith(PACKAGE_PREFIX) else ""
-                rows.append(f"{C.WHT}{idx + 1:4}. {text}{C.R}{C.GRN}{label_part}{C.R}{C.GRY}{alias_part}{tag}{C.R}")
-            else:
+            if idx >= len(shown):
                 rows.append("")
-        rows.append("")
-        rows.append(f"{C.WHT}Lọc:{C.R} {state['filt']}_")
+                continue
+            pkg = shown[idx]
+            on = pkg in selected
+            box = f"{C.GRN}[√]{C.R}" if on else f"{C.GRY}[ ]{C.R}"
+            num = f"{C.GRY}{idx + 1:4}.{C.R}"
+            label = _APP_LABEL_CACHE.get(pkg, "")
+            label_part = f" [{label}]" if label and label != pkg else ""
+            alias = ALIASES.get(pkg, "")
+            alias_part = f" ({alias})" if alias else ""
+            tag = " [prefix]" if PACKAGE_PREFIX and pkg.startswith(PACKAGE_PREFIX) else ""
+            plain = pkg + label_part + alias_part + tag
+            if len(plain) > width:
+                plain = plain[:width - 1] + "…"
+            color = C.GRN if on else C.WHT
+            rows.append(f"{box} {num} {color}{plain}{C.R}")
+        rows.append(rule)
+        rows.append(f"{C.WHT}Nhập:{C.R} {state['buf']}_")
         msg_color = C.GRN if state["msg"].startswith("✓") else C.YEL
         rows.append(f"{msg_color}{state['msg']}{C.R}")
         # Vẽ đè từ đầu màn hình, mỗi dòng xóa phần thừa; không xóa cả màn hình
         out = ["\033[H"]
         if not state.get("inited"):
-            # Lần vẽ đầu: xóa sạch màn hình để không còn nội dung menu phía trên
             out = ["\033[2J\033[H"]
             state["inited"] = True
         for i, line in enumerate(rows):
@@ -9327,113 +9497,87 @@ def search_packages_by_keyword():
         sys.stdout.write("".join(out))
         sys.stdout.flush()
 
-    def row_to_index(y):
-        ps = page_size()
-        r = y - (HEADER_ROWS + 1)  # hàng đầu tiên của danh sách là hàng HEADER_ROWS+1
-        if 0 <= r < ps:
-            return state["offset"] + r
-        return None
-
-    def copy_index(i):
-        shown = visible(state["filt"])
-        if i is None or i >= len(shown):
-            return
-        pkg = shown[i]
-        if copy_to_clipboard(pkg):
-            state["msg"] = f"✓ Đã copy: {pkg}"
+    def copy_now():
+        ok, chosen = _copy_selected(packages, selected)
+        if ok:
+            state["msg"] = f"✓ Đã copy {len(chosen)} package vào clipboard"
+            state["copy_fail"] = None
         else:
-            state["msg"] = f"Không copy được (cần Termux:API hoặc xclip). Tên: {pkg}"
+            state["msg"] = "Không copy được (cần Termux:API hoặc xclip). Sẽ in danh sách khi thoát."
+            state["copy_fail"] = chosen
 
-    def edit_filter():
-        """Tạm thoát chế độ chạm để nhập lọc bằng input(), bàn phím sẽ hiện."""
-        sys.stdout.write("\033[?1006l\033[?1000l")
-        sys.stdout.flush()
-        termios.tcsetattr(fd, termios.TCSADRAIN, old_attr)
-        try:
-            print()
-            new = input(f"{C.WHT}Lọc (Enter để xóa lọc):{C.R} ").strip().lower()
-            state["filt"] = new
+    def submit():
+        """Xử lý dòng vừa nhập bằng Enter. Trả về True nếu cần thoát."""
+        text = state["buf"].strip()
+        state["buf"] = ""
+        low = text.lower()
+        if text == "":
+            if selected:
+                copy_now()
+            elif state["filt"]:
+                state["filt"] = ""
+                state["offset"] = 0
+                state["msg"] = "Đã bỏ lọc"
+            else:
+                state["msg"] = "Gõ số để chọn package, 0 để thoát."
+            return False
+        if low == "0":
+            return True
+        shown = visible(state["filt"])
+        if low == "*":
+            state["filt"] = ""
             state["offset"] = 0
-            state["msg"] = ""
-        except (EOFError, KeyboardInterrupt):
-            pass
-        finally:
-            tty.setcbreak(fd)
-            sys.stdout.write("\033[?1000h\033[?1006h")
-            sys.stdout.flush()
-            state.pop("inited", None)  # vẽ lại toàn màn hình, xóa dòng nhập
-            draw()
-
-    def handle_mouse(b, x, y, press):
-        if not press:
-            return
-        if b & 64:  # cuộn chuột
-            step = page_size()
-            state["offset"] += step if (b & 3) == 1 else -step
-            state["offset"] = max(0, state["offset"])
-            return
-        if (b & 0x20) == 0 and (b & 3) == 0:  # chạm / nhấn chuột trái
-            if y == HEADER_ROWS + page_size() + 2:  # hàng "Lọc:"
-                state["edit"] = True
-                return
-            copy_index(row_to_index(y))
+            state["msg"] = "Đã bỏ lọc"
+        elif low == "x":
+            selected.clear()
+            state["msg"] = "Đã bỏ chọn tất cả"
+        elif low == "a":
+            selected.update(shown)
+            state["msg"] = f"Đã chọn {len(shown)} package đang hiện"
+        elif low in ("+", "-"):
+            page(1 if low == "+" else -1)
+        elif _PICK_RX.match(text) and any(c.isdigit() for c in text):
+            state["msg"] = _toggle_pick(text, shown, selected)
+        else:
+            state["filt"] = low
+            state["offset"] = 0
+            state["msg"] = f"Lọc '{low}': {len(visible(low))} kết quả"
+        return False
 
     old_mode = None
     try:
         tty.setcbreak(fd)
-        sys.stdout.write("\033[?1000h\033[?1006h")  # bật báo sự kiện chuột kiểu SGR
-        sys.stdout.flush()
         draw()
-        buf = b""
         while True:
             ch = os.read(fd, 1)
             if not ch:
                 break
-            if ch == b"\x1b":
-                seq = b""
-                while True:
-                    nxt = os.read(fd, 1)
-                    seq += nxt
-                    if not nxt or (0x40 <= nxt[0] <= 0x7e and nxt != b"["):
-                        break
-                    if len(seq) > 32:
-                        break
-                if seq.startswith(b"[<"):
-                    try:
-                        body = seq[2:-1].decode()
-                        b_, x_, y_ = (int(v) for v in body.split(";"))
-                        handle_mouse(b_, x_, y_, seq[-1:] == b"M")
-                    except Exception:
-                        pass
-                if state.pop("edit", False):
-                    edit_filter()
-                    continue
+            if ch == b"\x1b":          # phím mũi tên / điều hướng: bỏ qua
+                _skip_escape(fd)
                 draw()
                 continue
             if ch in (b"\r", b"\n"):
-                if state["filt"]:
-                    state["filt"] = ""
-                    state["offset"] = 0
-                    state["msg"] = ""
-                    draw()
-                    continue
-                break
+                if submit():
+                    break
+                draw()
+                continue
             if ch in (b"\x7f", b"\x08"):
-                state["filt"] = state["filt"][:-1]
-                state["offset"] = 0
+                state["buf"] = state["buf"][:-1]
                 draw()
                 continue
-            if ch == b"+":
-                state["offset"] += page_size()
+            if not state["buf"] and ch in (b"+", b"-"):   # đổi trang ngay khi không đang nhập gì
+                page(1 if ch == b"+" else -1)
                 draw()
                 continue
-            if ch == b"-":
-                state["offset"] = max(0, state["offset"] - page_size())
-                draw()
+            if ch[0] >= 0xC0:         # ký tự UTF-8 nhiều byte (tiếng Việt): đọc đủ các byte còn lại
+                need = 2 if ch[0] < 0xE0 else 3 if ch[0] < 0xF0 else 4
+                ch += os.read(fd, need - 1)
+            try:
+                txt = ch.decode("utf-8")
+            except UnicodeDecodeError:
                 continue
-            if ch.isascii() and ch.decode().isprintable():
-                state["filt"] += ch.decode().lower()
-                state["offset"] = 0
+            if txt.isprintable():
+                state["buf"] += txt
                 state["msg"] = ""
                 draw()
     finally:
@@ -9441,6 +9585,10 @@ def search_packages_by_keyword():
         sys.stdout.flush()
         termios.tcsetattr(fd, termios.TCSADRAIN, old_attr)
     print()
+    if state["copy_fail"]:
+        print(f"{C.YEL}Danh sách đã chọn:{C.R}")
+        for p in state["copy_fail"]:
+            print(f"  {p}")
 
 _FETCH_SCRIPT = r"""
 import sys, json, urllib.request, urllib.error
@@ -10143,28 +10291,22 @@ def menu_setup():
     while True:
         clear_screen()
         section_title("SET UP")
-        print(f"{C.LPUR}[1]{C.R} {C.WHT}Auto rejoin{C.R}")
-        print(f"{C.LPUR}[2]{C.R} {C.WHT}Chọn game{C.R}")
-        print(f"{C.LPUR}[3]{C.R} {C.WHT}Auto Clear Data [{f'{C.GRN}Bật{C.R}' if AUTO_CLEAR_DATA else f'{C.GRY}Tắt{C.R}'}]{C.R}")
-        print(f"{C.LPUR}[4]{C.R} {C.WHT}Auto Backup [{f'{C.GRN}Bật{C.R}' if AUTO_BACKUP else f'{C.GRY}Tắt{C.R}'}]{C.R}")
-        print(f"{C.LPUR}[5]{C.R} {C.WHT}Cảnh báo RAM [{f'{C.GRN}Bật{C.R}' if LOW_RAM_ALERT else f'{C.GRY}Tắt{C.R}'}]{C.R}")
-        print(f"{C.LPUR}[6]{C.R} {C.WHT}Profile [{len(PROFILES)}]{C.R}")
-        print(f"{C.LPUR}[7]{C.R} {C.WHT}Tìm kiếm package{C.R}")
-        print(f"{C.LPUR}[8]{C.R} {C.WHT}Hẹn giờ [{f'{C.GRN}Bật{C.R}' if (SCHEDULE.get('start') or SCHEDULE.get('stop')) else f'{C.GRY}Tắt{C.R}'}]{C.R}")
-        print(f"{C.LPUR}[9]{C.R} {C.WHT}Graphics Optimizer [{gfx_settings_label()}]{C.R}")
-        print(f"{C.LPUR}[10]{C.R} {C.WHT}Biệt danh tab [{len(ALIASES)}]{C.R}")
-        print(f"{C.LPUR}[11]{C.R} {C.WHT}Kiểm tra mạng [{f'{C.GRN}Bật{C.R}' if NET_CHECK else f'{C.GRY}Tắt{C.R}'}]{C.R}")
-        print(f"{C.LPUR}[12]{C.R} {C.WHT}Lịch restart [{auto_restart_label()}]{C.R}")
-        print(f"{C.LPUR}[13]{C.R} {C.WHT}Key Injector [{key_label()}]{C.R}")
-        print(f"{C.LPUR}[14]{C.R} {C.WHT}Màn hình trắng/đen [{screen_guard_label()}]{C.R}")
-        print(f"{C.LPUR}[15]{C.R} {C.WHT}Server Hop [{hop_label()}]{C.R}")
+        print(f"{C.LPUR}[1]{C.R} {C.WHT}Model rejoin{C.R}")
+        print(f"{C.LPUR}[2]{C.R} {C.WHT}Set up game{C.R}")
+        print(f"{C.LPUR}[3]{C.R} {C.WHT}Profile [{len(PROFILES)}]{C.R}")
+        print(f"{C.LPUR}[4]{C.R} {C.WHT}Tìm kiếm package{C.R}")
+        print(f"{C.LPUR}[5]{C.R} {C.WHT}Graphics Optimizer [{gfx_settings_label()}]{C.R}")
+        print(f"{C.LPUR}[6]{C.R} {C.WHT}Biệt danh tab [{len(ALIASES)}]{C.R}")
+        print(f"{C.LPUR}[7]{C.R} {C.WHT}Lịch restart [{auto_restart_label()}]{C.R}")
+        print(f"{C.LPUR}[8]{C.R} {C.WHT}Key Injector [{key_label()}]{C.R}")
+        print(f"{C.LPUR}[9]{C.R} {C.WHT}Màn hình trắng/đen [{screen_guard_label()}]{C.R}")
+        print(f"{C.LPUR}[10]{C.R} {C.WHT}Server Hop [{hop_label()}]{C.R}")
         _ai_on = AI_SETTINGS.get('analysis')
-        print(f"{C.LPUR}[16]{C.R} {C.WHT}Pain AI [{f'{C.GRN}Bật{C.R}' if _ai_on else f'{C.GRY}Tắt{C.R}'}]{C.R}")
-        print(f"{C.LPUR}[17]{C.R} {C.WHT}Giờ im lặng [{f'{C.GRN}Bật{C.R}' if QUIET_HOURS.get('enabled') else f'{C.GRY}Tắt{C.R}'}]{C.R}")
-        print(f"{C.LPUR}[18]{C.R} {C.WHT}Giới hạn thời gian [{f'{C.GRN}Bật{C.R}' if STOP_TIMER.get('enabled') else f'{C.GRY}Tắt{C.R}'}]{C.R}")
-        print(f"{C.LPUR}[19]{C.R} {C.WHT}Chỉ theo dõi [{f'{C.GRN}Bật{C.R}' if MONITOR_ONLY else f'{C.GRY}Tắt{C.R}'}]{C.R}")
-        print(f"{C.LPUR}[20]{C.R} {C.WHT}Lưu ảnh lỗi nặng [{f'{C.GRN}Bật{C.R}' if SCREEN_ARCHIVE.get('enabled') else f'{C.GRY}Tắt{C.R}'}]{C.R}")
-        print(f"{C.LPUR}[21]{C.R} {C.WHT}Set up cấu hình{C.R}")
+        print(f"{C.LPUR}[11]{C.R} {C.WHT}Pain AI [{f'{C.GRN}Bật{C.R}' if _ai_on else f'{C.GRY}Tắt{C.R}'}]{C.R}")
+        print(f"{C.LPUR}[12]{C.R} {C.WHT}Set up cấu hình{C.R}")
+        print(f"{C.LPUR}[13]{C.R} {C.WHT}Thống kê độ ổn định{C.R}")
+        print(f"{C.LPUR}[14]{C.R} {C.WHT}Hồ sơ theo game{C.R}")
+        print(f"{C.LPUR}[15]{C.R} {C.WHT}Ban Tracking Stats{C.R}")
         print(f"{C.RED}[0] Quay lại{C.R}")
         sub = input("Chọn: ").strip()
         if sub == "1":
@@ -10174,62 +10316,46 @@ def menu_setup():
             announce_choice("2", "Chọn game & Liên kết package")
             menu_choose_game_with_package()
         elif sub == "3":
-            announce_choice("3", "Auto Clear Data")
-            setup_auto_clear()
-        elif sub == "4":
-            announce_choice("4", "Auto Backup")
-            setup_auto_backup()
-        elif sub == "5":
-            announce_choice("5", "Cảnh báo RAM thấp")
-            setup_low_ram()
-        elif sub == "6":
-            announce_choice("6", "Profile cấu hình")
+            announce_choice("3", "Profile cấu hình")
             menu_profile()
-        elif sub == "7":
-            announce_choice("7", "Tìm package name")
+        elif sub == "4":
+            announce_choice("4", "Tìm package name")
             search_packages_by_keyword()
-        elif sub == "8":
-            announce_choice("8", "Hẹn giờ tự chạy / tự dừng")
-            menu_schedule()
-        elif sub == "9":
-            announce_choice("9", "Graphics Optimizer")
+        elif sub == "5":
+            announce_choice("5", "Graphics Optimizer")
             menu_low_graphics()
-        elif sub == "10":
-            announce_choice("10", "Biệt danh tab")
+        elif sub == "6":
+            announce_choice("6", "Biệt danh tab")
             menu_alias()
-        elif sub == "11":
-            announce_choice("11", "Kiểm tra mạng trước khi rejoin")
-            setup_net_check()
-        elif sub == "12":
-            announce_choice("12", "Lịch tự động restart")
+        elif sub == "7":
+            announce_choice("7", "Lịch tự động restart")
             menu_auto_restart()
-        elif sub == "13":
-            announce_choice("13", "Client Key Injector")
+        elif sub == "8":
+            announce_choice("8", "Client Key Injector")
             menu_key_injector()
-        elif sub == "14":
-            announce_choice("14", "Phát hiện màn hình trắng/đen & GUI đứng")
+        elif sub == "9":
+            announce_choice("9", "Phát hiện màn hình trắng/đen & GUI đứng")
             menu_screen_guard()
-        elif sub == "15":
-            announce_choice("15", "Auto Server Hop")
+        elif sub == "10":
+            announce_choice("10", "Auto Server Hop")
             menu_server_hop()
-        elif sub == "16":
-            announce_choice("16", "Pain AI")
+        elif sub == "11":
+            announce_choice("11", "Pain AI")
             menu_ai_setup()
-        elif sub == "17":
-            announce_choice("17", "Giờ im lặng cảnh báo")
-            menu_quiet_hours()
-        elif sub == "18":
-            announce_choice("18", "Giới hạn thời gian chạy")
-            menu_stop_timer()
-        elif sub == "19":
-            announce_choice("19", "Chế độ chỉ theo dõi")
-            toggle_monitor_only()
-        elif sub == "20":
-            announce_choice("20", "Lưu ảnh khi có lỗi nghiêm trọng")
-            toggle_screen_archive()
-        elif sub == "21":
-            announce_choice("21", "Set up cấu hình")
+        elif sub == "12":
+            announce_choice("12", "Set up cấu hình")
             menu_config_io()
+        elif sub == "13":
+            announce_choice("13", "Thống kê độ ổn định")
+            menu_stability_stats()
+        elif sub == "14":
+            announce_choice("14", "Hồ sơ theo game")
+            menu_game_profiles()
+        elif sub == "15":
+            announce_choice("15", "Ban Tracking Stats")
+            display_ban_stats()
+            display_upgrade_stats()
+            wait_enter()
         elif sub == "0":
             msg_info("Quay lại menu chính...")
             time.sleep(0.6)
@@ -10844,7 +10970,7 @@ HELP_PAGES = [
     ("Chọn game và package", [
         "Set up mục 2: chọn game muốn chạy.",
         "Mục 3 (Thiết lập prefix package): đặt prefix để tool nhận đúng các package của bạn.",
-        "Set up mục 7: xem toàn bộ package trên máy, chạm vào tên để copy.",
+        "Set up mục 4: xem toàn bộ package trên máy, chạm vào tên để copy.",
     ]),
     ("Bắt đầu chạy", [
         "Mục 1 (Start): tool bắt đầu giám sát và tự vào lại map khi bị văng.",
@@ -11006,6 +11132,36 @@ def run_selftest():
     print(f"\n{len(cases) - failed}/{len(cases)} kiểm tra đạt")
     return failed == 0
 
+def menu_settings():
+    """Mục Cài đặt: gom các tùy chọn cấu hình thường dùng. Gọi lại đúng các hàm đã có ở Set up."""
+    items = [
+        ("Auto Clear Data", setup_auto_clear),
+        ("Auto Backup", setup_auto_backup),
+        ("Cảnh báo RAM thấp", setup_low_ram),
+        ("Kiểm tra mạng trước khi rejoin", setup_net_check),
+        ("Hẹn giờ tự chạy / tự dừng", menu_schedule),
+        ("Giờ im lặng cảnh báo", menu_quiet_hours),
+        ("Giới hạn thời gian chạy", menu_stop_timer),
+        ("Chế độ chỉ theo dõi", toggle_monitor_only),
+        ("Lưu ảnh khi có lỗi nghiêm trọng", toggle_screen_archive),
+        ("Tự động start khi khởi động", menu_autostart_boot),
+    ]
+    while True:
+        clear_screen()
+        section_title("CÀI ĐẶT")
+        for i, (label, _) in enumerate(items, 1):
+            print(f"{C.LPUR}[{i}]{C.R} {C.WHT}{label}{C.R}")
+        print(f"{C.RED}[0] Quay lại{C.R}\n")
+        sub = input("Chọn: ").strip()
+        if sub == "0":
+            return
+        if sub.isdigit() and 1 <= int(sub) <= len(items):
+            label, fn = items[int(sub) - 1]
+            announce_choice(sub, label)
+            fn()
+        else:
+            invalid_choice(sub)
+
 def verify_and_start():
     authenticate()   # <-- Xác thực key thẳng, vào menu ngay
 
@@ -11032,7 +11188,7 @@ def verify_and_start():
     while True:
         license_guard_tick()
         show_banner()
-        choice = ask_main("Chọn chức năng [0-20]:").strip()
+        choice = ask_main("Chọn chức năng [0-17]:").strip()
         if choice.lower() == "help":
             show_help()
             continue
@@ -11068,23 +11224,15 @@ def verify_and_start():
         elif choice == "12":
             menu_view_log()
         elif choice == "13":
-            menu_stability_stats()
-        elif choice == "14":
-            menu_game_profiles()
-        elif choice == "15":
             menu_executor_binding()
-        elif choice == "16":
-            display_ban_stats()
-            display_upgrade_stats()  # UPGRADE #9: Show upgrade stats in menu
-            wait_enter()
-        elif choice == "17":
+        elif choice == "14":
             menu_anti_afk()
-        elif choice == "18":
+        elif choice == "15":
             menu_music()
-        elif choice == "19":
+        elif choice == "16":
             emergency_stop()
-        elif choice == "20":
-            menu_autostart_boot()
+        elif choice == "17":
+            menu_settings()
 
 
 def menu_autostart_boot():
