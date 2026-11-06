@@ -9,7 +9,6 @@ const {
     ActionRowBuilder, 
     StringSelectMenuBuilder,
     ComponentType,
-    PermissionFlagsBits
 } = require('discord.js');
 const mongoose = require('mongoose');
 const express = require('express');
@@ -158,7 +157,7 @@ async function writeAudit(data) {
 }
 
 const isSystemAdmin = async (userId) => userId === OWNER_ID || !!(await Admin.exists({ user_id: userId }));
-const adminOnly = (builder) => builder.setDefaultMemberPermissions(PermissionFlagsBits.Administrator);
+const adminOnly = (builder) => builder.setDefaultMemberPermissions(0n);
 
 console.log('🔄 Đang tiến hành kết nối đến MongoDB Atlas...');
 mongoose.connect(MONGODB_URI)
@@ -305,19 +304,19 @@ const cooldowns = new Map();
 const COOLDOWN_TIME = 5000; 
 
 const commands = [
-    new SlashCommandBuilder().setName('setadmin').setDescription('Thêm/xóa admin hệ thống')
+    adminOnly(new SlashCommandBuilder().setName('setadmin').setDescription('Owner: Thêm/xóa Admin hệ thống')
         .addStringOption(opt => opt.setName('action').setDescription('Thao tác').setRequired(true).addChoices({ name: '➕ Thêm Admin', value: 'add' }, { name: '➖ Xóa Admin', value: 'remove' }))
-        .addUserOption(opt => opt.setName('user').setDescription('Thành viên target').setRequired(true)),
-    new SlashCommandBuilder().setName('createkey').setDescription('Tạo key bản quyền Premium')
+        .addUserOption(opt => opt.setName('user').setDescription('Thành viên target').setRequired(true))),
+    adminOnly(new SlashCommandBuilder().setName('createkey').setDescription('Admin: Tạo key bản quyền Premium')
         .addStringOption(opt => opt.setName('duration').setDescription('Thời hạn key').setRequired(true).addChoices({name: '1 Ngày', value: '1'}, {name: '3 Ngày', value: '3'}, {name: '7 Ngày', value: '7'}, {name: '30 Ngày', value: '30'}, {name: 'Vĩnh viễn', value: '0'}))
         .addUserOption(opt => opt.setName('user').setDescription('Gửi key qua DM cho user').setRequired(false))
-        .addIntegerOption(opt => opt.setName('quantity').setDescription('Số lượng muốn tạo (mặc định 1, tối đa 50)').setRequired(false).setMinValue(2).setMaxValue(50)),
-    new SlashCommandBuilder().setName('gettoken').setDescription('Tạo token cho phép Reset HWID')
+        .addIntegerOption(opt => opt.setName('quantity').setDescription('Số lượng muốn tạo (mặc định 1, tối đa 50)').setRequired(false).setMinValue(2).setMaxValue(50))),
+    adminOnly(new SlashCommandBuilder().setName('gettoken').setDescription('Admin: Tạo token cho phép Reset HWID')
         .addUserOption(opt => opt.setName('user').setDescription('Gửi token qua DM cho user').setRequired(false))
-        .addIntegerOption(opt => opt.setName('quantity').setDescription('Số lượng muốn tạo (mặc định 1, tối đa 50)').setRequired(false).setMinValue(2).setMaxValue(50)),
+        .addIntegerOption(opt => opt.setName('quantity').setDescription('Số lượng muốn tạo (mặc định 1, tối đa 50)').setRequired(false).setMinValue(2).setMaxValue(50))),
     new SlashCommandBuilder().setName('getkey').setDescription('Xem danh sách & thông tin chi tiết key của bạn'),
-    new SlashCommandBuilder().setName('removekey').setDescription('Xóa key khỏi hệ thống (Chỉ Owner)')
-        .addStringOption(opt => opt.setName('toolkey').setDescription('Mã Tool Key cần xóa').setRequired(true)),
+    adminOnly(new SlashCommandBuilder().setName('removekey').setDescription('Owner: Xóa key khỏi hệ thống')
+        .addStringOption(opt => opt.setName('toolkey').setDescription('Mã Tool Key cần xóa').setRequired(true))),
     new SlashCommandBuilder().setName('resethwid').setDescription('Thực hiện Reset HWID cho Key')
         .addStringOption(opt => opt.setName('key').setDescription('Chọn key cần reset').setRequired(true).setAutocomplete(true))
         .addStringOption(opt => opt.setName('token').setDescription('Token cấp phép (Tùy chọn)').setRequired(false)),
@@ -464,25 +463,26 @@ async function backupDatabase() {
 client.once('ready', async () => {
     try {
         const appId = CLIENT_ID || client.user.id;
-        // Dùng Guild Commands để cập nhật tức thì và đặt quyền hiển thị theo từng Owner/Admin.
-        // Mặc định các lệnh quản trị yêu cầu Administrator; user Admin trong DB được cấp override riêng.
+
+        // Xóa command Global cũ để tránh lệnh Global cũ đè/gây nhầm với Guild Commands.
         await rest.put(Routes.applicationCommands(appId), { body: [] });
+
+        let successGuilds = 0;
         for (const guild of client.guilds.cache.values()) {
-            const registered = await rest.put(Routes.applicationGuildCommands(appId, guild.id), { body: commands });
-            const admins = await Admin.find({}, { user_id: 1, _id: 0 }).lean();
-            const allowedUsers = [...new Set([OWNER_ID, ...admins.map(a => a.user_id).filter(Boolean)])];
-            const adminNames = new Set(['tokeninfo','keyhistory','keyinfo','blacklist','backupcheck','backuprestore','adminperm','adminlist','adminstats','keystats','searchkey']);
-            for (const cmd of registered) {
-                if (!adminNames.has(cmd.name)) continue;
-                const permissions = allowedUsers.map(id => ({ id, type: 1, permission: true }));
-                try {
-                    await rest.put(Routes.applicationCommandPermissions(appId, guild.id, cmd.id), { body: { permissions } });
-                } catch (permErr) {
-                    console.error(`[COMMAND PERMISSIONS] Không thể đặt quyền cho /${cmd.name} tại guild ${guild.id}:`, permErr.message);
-                }
+            try {
+                const registered = await rest.put(
+                    Routes.applicationGuildCommands(appId, guild.id),
+                    { body: commands }
+                );
+                successGuilds++;
+                console.log(`[SLASH] Đã đăng ký ${registered.length} lệnh tại ${guild.name} (${guild.id}).`);
+            } catch (guildError) {
+                console.error(`[SLASH] Không thể đăng ký lệnh tại ${guild.name} (${guild.id}):`, guildError.message);
             }
         }
-        console.log('🌐 Đã đăng ký Slash Commands theo từng Server và đồng bộ quyền Owner/Admin.');
+
+        console.log(`🌐 Đăng ký Guild Slash Commands hoàn tất: ${successGuilds}/${client.guilds.cache.size} server.`);
+        console.log('🔐 Lệnh quản trị đặt mặc định quyền 0; hãy cho phép Owner/Admin trong Server Settings > Integrations > PAIN TOOL BOT > Permissions.');
         console.log(`✅ Bot Discord đã sẵn sàng hoạt động: ${client.user.tag}`);
         checkExpiredKeys();
         setInterval(checkExpiredKeys, 60 * 1000);
@@ -561,13 +561,6 @@ client.on('interactionCreate', async interaction => {
             if (action === 'add') await Admin.findOneAndUpdate({user_id:target.id},{user_id:target.id},{upsert:true});
             else await Admin.deleteOne({user_id:target.id});
             await interaction.editReply({ content: action === 'add' ? `Đã cấp quyền Admin cho <@${target.id}>.` : `Đã gỡ quyền Admin của <@${target.id}>.` });
-            // Cập nhật quyền hiển thị lệnh ngay trong server hiện tại.
-            const appId = CLIENT_ID || client.user.id;
-            const guildCommands = await rest.get(Routes.applicationGuildCommands(appId, interaction.guildId));
-            const admins = await Admin.find({}, {user_id:1,_id:0}).lean();
-            const allowed = [...new Set([OWNER_ID, ...admins.map(a=>a.user_id).filter(Boolean)])];
-            const restricted = new Set(['tokeninfo','keyhistory','keyinfo','blacklist','backupcheck','backuprestore','adminperm','adminlist','adminstats','keystats','searchkey']);
-            for (const c of guildCommands.filter(c=>restricted.has(c.name))) await rest.put(Routes.applicationCommandPermissions(appId, interaction.guildId, c.id), {body:{permissions:allowed.map(id=>({id,type:1,permission:true}))}});
             return;
         }
         if (commandName === 'adminlist') {
@@ -619,15 +612,6 @@ client.on('interactionCreate', async interaction => {
                 await Admin.deleteOne({ user_id: target.id });
                 const embed = new EmbedBuilder().setColor(COLORS.PURPLE).setTitle('🛡️ CẬP NHẬT TRẠNG THÁI ADMIN').setDescription(`✅ Đã gỡ bỏ quyền **Admin** của người dùng:\n• **User:** <@${target.id}> (${target.tag})`).setThumbnail(userAvatar).setFooter(getFooterOptions());
                 await interaction.editReply({ embeds: [embed] });
-            }
-            // Đồng bộ quyền nhìn thấy lệnh quản trị ngay sau khi cấp/gỡ Admin.
-            const appId = CLIENT_ID || client.user.id;
-            const guildCommands = await rest.get(Routes.applicationGuildCommands(appId, interaction.guildId));
-            const admins = await Admin.find({}, { user_id: 1, _id: 0 }).lean();
-            const allowed = [...new Set([OWNER_ID, ...admins.map(a => a.user_id).filter(Boolean)])];
-            const restricted = new Set(['tokeninfo','keyhistory','keyinfo','blacklist','backupcheck','backuprestore','adminperm','adminlist','adminstats','keystats','searchkey']);
-            for (const c of guildCommands.filter(c => restricted.has(c.name))) {
-                await rest.put(Routes.applicationCommandPermissions(appId, interaction.guildId, c.id), { body: { permissions: allowed.map(id => ({ id, type: 1, permission: true })) } });
             }
         }
         else if (commandName === 'createkey') {
