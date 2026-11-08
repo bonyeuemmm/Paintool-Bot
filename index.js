@@ -19,13 +19,13 @@ const path = require('path');
 
 // BOT_ROLE: 'main' = bot chính (API, lệnh thành viên, tác vụ nền). 'admin' = bot admin (lệnh quản trị).
 // Mỗi service trên bot-hosting chạy một vai trò, cùng một file này.
-const BOT_ROLE = (process.env.BOT_ROLE || 'main').trim().toLowerCase();
-if (BOT_ROLE !== 'main' && BOT_ROLE !== 'admin') {
-    console.error(`[FATAL] BOT_ROLE phải là 'main' hoặc 'admin' (hiện là '${BOT_ROLE}').`);
+const BOT_ROLE = (process.env.BOT_ROLE || 'both').trim().toLowerCase();
+if (!['main', 'admin', 'both'].includes(BOT_ROLE)) {
+    console.error(`[FATAL] BOT_ROLE phải là 'both', 'main' hoặc 'admin' (hiện là '${BOT_ROLE}').`);
     process.exit(1);
 }
-const IS_MAIN = BOT_ROLE === 'main';
-const IS_ADMIN = BOT_ROLE === 'admin';
+const IS_MAIN = BOT_ROLE !== 'admin';   // bot chính (DISCORD_TOKEN)
+const IS_ADMIN = BOT_ROLE !== 'main';   // bot admin (ADMIN_BOT_TOKEN), chạy cùng tiến trình khi 'both'
 
 const TOKEN = process.env.DISCORD_TOKEN;
 if (IS_MAIN && (!TOKEN || typeof TOKEN !== 'string' || TOKEN.trim() === '')) {
@@ -355,7 +355,7 @@ const client = new Client({
 
 // ============ BOT ADMIN (token riêng). Thiếu ADMIN_BOT_TOKEN thì chỉ chạy bot chính. ============
 const ADMIN_BOT_TOKEN = IS_ADMIN ? ((process.env.ADMIN_BOT_TOKEN || '').trim() || null) : null;
-if (IS_ADMIN && !ADMIN_BOT_TOKEN) {
+if (BOT_ROLE === 'admin' && !ADMIN_BOT_TOKEN) {
     console.error('[FATAL] BOT_ROLE=admin nhưng thiếu ADMIN_BOT_TOKEN.');
     process.exit(1);
 }
@@ -1127,9 +1127,9 @@ async function handleInteraction(interaction) {
 }
 
 if (IS_MAIN) client.on('interactionCreate', handleInteraction);
-if (IS_ADMIN && adminClient) adminClient.on('interactionCreate', handleInteraction);
+if (adminClient) adminClient.on('interactionCreate', handleInteraction);
 
-if (IS_ADMIN && adminClient) {
+if (adminClient) {
     adminClient.once('ready', async () => {
         try {
             const appId = ADMIN_CLIENT_ID_ENV || adminClient.user.id;
