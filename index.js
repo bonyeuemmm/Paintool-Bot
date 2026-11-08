@@ -127,52 +127,12 @@ keySchema.index({ key: 1 }, { unique: true });
 keySchema.index({ assigned_key: 1 }, { unique: true, partialFilterExpression: { assigned_key: { $type: 'string' } } });
 const Key = mongoose.model('Key', keySchema);
 
-// Tự động chuyển Tool Key cũ sang định dạng PAIN-XXXX-XXXX-XXXX khi bot khởi động.
-// Chỉ cập nhật assigned_key; key gốc dùng để redeem và các dữ liệu khác được giữ nguyên.
-const TOOL_KEY_FORMAT = /^PAIN-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}$/;
 function generateToolKey() {
     const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
     const parts = Array.from({ length: 3 }, () =>
         Array.from({ length: 4 }, () => alphabet[crypto.randomInt(0, alphabet.length)]).join('')
     );
     return `PAIN-${parts.join('-')}`;
-}
-
-async function migrateLegacyAssignedKeys() {
-    try {
-        const legacyRows = await Key.find({
-            assigned_key: { $type: 'string', $ne: '' }
-        }).select('_id key assigned_key').lean();
-
-        let migrated = 0;
-        for (const row of legacyRows) {
-            if (TOOL_KEY_FORMAT.test(row.assigned_key)) continue;
-
-            let newAssignedKey;
-            let exists = true;
-            while (exists) {
-                newAssignedKey = generateToolKey();
-                exists = !!(await Key.exists({ assigned_key: newAssignedKey }));
-            }
-
-            const result = await Key.updateOne(
-                { _id: row._id, assigned_key: row.assigned_key },
-                { $set: { assigned_key: newAssignedKey } }
-            );
-            if (result.modifiedCount === 1) {
-                migrated++;
-                await writeAudit({
-                    action: 'TOOL_KEY_FORMAT_MIGRATED',
-                    key_value: row.key,
-                    details: { old_assigned_key: row.assigned_key, assigned_key: newAssignedKey }
-                });
-            }
-        }
-
-        console.log(`✅ [KEY MIGRATION] Đã chuyển ${migrated} Tool Key cũ sang định dạng mới.`);
-    } catch (err) {
-        console.error('❌ [KEY MIGRATION] Không thể chuyển Tool Key cũ:', err.message);
-    }
 }
 
 const tokenSchema = new mongoose.Schema({
@@ -211,7 +171,6 @@ console.log('🔄 Đang tiến hành kết nối đến MongoDB Atlas...');
 mongoose.connect(MONGODB_URI)
     .then(async () => {
         console.log('✅ Đã kết nối MongoDB Atlas thành công!');
-        await migrateLegacyAssignedKeys();
         backupDatabase();
     })
     .catch(err => console.error('❌ Lỗi kết nối MongoDB:', err));
@@ -272,8 +231,31 @@ app.get('/api/download/latest', (req, res) => {
 });
 
 // ROUTE XÁC THỰC VÀ PHÁT CODE PREMIUM TRỰC TIẾP
+// Báo owner khi một key bị thử trên máy khác. Mỗi key chỉ báo tối đa 1 lần / giờ để tránh spam.
+const HWID_ALERT_COOLDOWN_MS = 60 * 60 * 1000;
+const lastHwidAlert = new Map();
+const maskHwid = (h) => (h && h.length > 10 ? `${h.slice(0, 4)}...${h.slice(-4)}` : (h || 'N/A'));
+function alertHwidMismatch(row, newHwid) {
+    const now = Date.now();
+    const last = lastHwidAlert.get(row.assigned_key) || 0;
+    if (now - last < HWID_ALERT_COOLDOWN_MS) return;
+    lastHwidAlert.set(row.assigned_key, now);
+    const embed = new EmbedBuilder()
+        .setColor(COLORS.WARNING)
+        .setTitle('⚠️ KEY ĐƯỢC DÙNG TRÊN MÁY KHÁC')
+        .addFields(
+            { name: 'Key', value: `\`${row.assigned_key}\``, inline: false },
+            { name: 'Người sở hữu', value: row.user_id ? `<@${row.user_id}>` : 'Chưa liên kết', inline: true },
+            { name: 'HWID đã gắn', value: `\`${maskHwid(row.hwid)}\``, inline: true },
+            { name: 'HWID vừa thử', value: `\`${maskHwid(newHwid)}\``, inline: true },
+            { name: 'Thời điểm', value: `<t:${Math.floor(now / 1000)}:F>`, inline: false }
+        )
+        .setFooter(getFooterOptions());
+    notifyOwner(client, embed).catch(() => {});
+}
+
 app.post(['/', '/api/verify'], async (req, res) => {
-    const { key, hwid, timestamp, signature } = req.body;
+    const { key, hwid, legacy_hwid, timestamp, signature } = req.body;
     try {
         if (typeof key !== 'string' || key.length > 64 || typeof hwid !== 'string' || !/^[A-Za-z0-9._:-]{8,128}$/.test(hwid) || !Number.isSafeInteger(timestamp) || typeof signature !== 'string' || !/^[a-f0-9]{64}$/i.test(signature)) {
             return res.status(400).json({ valid: false, reason: 'invalid_data' });
@@ -305,7 +287,17 @@ app.post(['/', '/api/verify'], async (req, res) => {
             row.hwid = hwid;
             await row.save();
         } else if (row.hwid !== hwid) {
-            return res.json({ valid: false, reason: "hwid_mismatch" });
+            // Key đã gắn bằng HWID cũ (UUID file): chuyển sang HWID phần cứng mới một lần.
+            const legacy = typeof legacy_hwid === 'string' && /^[A-Za-z0-9._:-]{8,128}$/.test(legacy_hwid) ? legacy_hwid : null;
+            if (legacy && row.hwid === legacy) {
+                const oldHwid = row.hwid;
+                row.hwid = hwid;
+                await row.save();
+                await writeAudit({ action: 'HWID_MIGRATED', key_value: row.key, details: { assigned_key: row.assigned_key, from: maskHwid(oldHwid), to: maskHwid(hwid) } });
+            } else {
+                alertHwidMismatch(row, hwid);
+                return res.json({ valid: false, reason: "hwid_mismatch" });
+            }
         }
 
         const premiumFilePath = path.join(__dirname, 'paintoolpremium.py');
@@ -355,6 +347,11 @@ const client = new Client({
 const cooldowns = new Map();
 const COOLDOWN_TIME = 5000; 
 
+// Lệnh cho mọi thành viên (đăng ký ở mọi server)
+const PUBLIC_COMMAND_NAMES = ['getkey', 'resethwid', 'redeem'];
+// Server riêng chỉ có Owner/Admin: chỉ tại đây mới đăng ký lệnh quản trị.
+const ADMIN_GUILD_ID = process.env.ADMIN_GUILD_ID || null;
+
 const commands = [
     adminOnly(new SlashCommandBuilder().setName('setadmin').setDescription('Owner: Thêm/xóa Admin hệ thống')
         .addStringOption(opt => opt.setName('action').setDescription('Thao tác').setRequired(true).addChoices({ name: '➕ Thêm Admin', value: 'add' }, { name: '➖ Xóa Admin', value: 'remove' }))
@@ -374,11 +371,7 @@ const commands = [
         .addStringOption(opt => opt.setName('token').setDescription('Token cấp phép (Tùy chọn)').setRequired(false)),
     new SlashCommandBuilder().setName('redeem').setDescription('Kích hoạt Key bản quyền')
         .addStringOption(opt => opt.setName('key').setDescription('Nhập mã key kích hoạt').setRequired(true)),
-    adminOnly(new SlashCommandBuilder().setName('tokeninfo').setDescription('Admin: Kiểm tra trạng thái Token')
-        .addStringOption(opt => opt.setName('token').setDescription('Token cần kiểm tra').setRequired(true))),
-    adminOnly(new SlashCommandBuilder().setName('tokenstats').setDescription('Admin: Thống kê Token')) ,
-    adminOnly(new SlashCommandBuilder().setName('keyhistory').setDescription('Admin: Xem lịch sử Key')
-        .addStringOption(opt => opt.setName('key').setDescription('Key gốc hoặc Tool Key (để trống xem gần đây)').setRequired(false))),
+    adminOnly(new SlashCommandBuilder().setName('keylist').setDescription('Admin: Danh sách key (đã nhập / chưa nhập, thời hạn)')),
     adminOnly(new SlashCommandBuilder().setName('keyinfo').setDescription('Admin: Xem thông tin Key')
         .addStringOption(opt => opt.setName('key').setDescription('Key gốc hoặc Tool Key').setRequired(true))),
     adminOnly(new SlashCommandBuilder().setName('blacklist').setDescription('Admin: Khóa Key theo thời hạn')
@@ -388,7 +381,6 @@ const commands = [
     adminOnly(new SlashCommandBuilder().setName('backuprestore').setDescription('Owner: Khôi phục bản sao lưu gần nhất')),
     adminOnly(new SlashCommandBuilder().setName('adminlist').setDescription('Admin: Danh sách Admin')),
     adminOnly(new SlashCommandBuilder().setName('adminstats').setDescription('Admin: Thống kê hệ thống')),
-    adminOnly(new SlashCommandBuilder().setName('keystats').setDescription('Admin: Thống kê Key')),
     adminOnly(new SlashCommandBuilder().setName('searchkey').setDescription('Admin: Tìm Key theo mã hoặc Discord UID')
         .addStringOption(opt => opt.setName('query').setDescription('Key gốc, Tool Key hoặc Discord UID').setRequired(true)))
 ];
@@ -517,12 +509,18 @@ client.once('ready', async () => {
         // Xóa command Global cũ để tránh lệnh Global cũ đè/gây nhầm với Guild Commands.
         await rest.put(Routes.applicationCommands(appId), { body: [] });
 
+        const publicBody = commands.filter(c => PUBLIC_COMMAND_NAMES.includes(c.name));
+        if (!ADMIN_GUILD_ID) {
+            console.warn('⚠️ [SLASH] Chưa đặt ADMIN_GUILD_ID: lệnh quản trị sẽ không được đăng ký ở server nào.');
+        }
         let successGuilds = 0;
         for (const guild of client.guilds.cache.values()) {
             try {
+                // Server admin: đủ lệnh. Server khác: chỉ lệnh thành viên. rest.put thay toàn bộ danh sách nên lệnh admin cũ bị gỡ.
+                const body = guild.id === ADMIN_GUILD_ID ? commands : publicBody;
                 const registered = await rest.put(
                     Routes.applicationGuildCommands(appId, guild.id),
-                    { body: commands }
+                    { body }
                 );
                 successGuilds++;
                 console.log(`[SLASH] Đã đăng ký ${registered.length} lệnh tại ${guild.name} (${guild.id}).`);
@@ -532,7 +530,7 @@ client.once('ready', async () => {
         }
 
         console.log(`🌐 Đăng ký Guild Slash Commands hoàn tất: ${successGuilds}/${client.guilds.cache.size} server.`);
-        console.log('🔐 Lệnh quản trị đặt mặc định quyền 0; hãy cho phép Owner/Admin trong Server Settings > Integrations > PAIN TOOL BOT > Permissions.');
+        console.log('🔐 Lệnh quản trị chỉ đăng ký ở server ADMIN_GUILD_ID (server riêng chỉ có Owner/Admin). Các server khác chỉ thấy lệnh thành viên.');
         console.log(`✅ Bot Discord đã sẵn sàng hoạt động: ${client.user.tag}`);
         checkExpiredKeys();
         setInterval(checkExpiredKeys, 60 * 1000);
@@ -600,42 +598,17 @@ client.on('interactionCreate', async interaction => {
     }
 
     try {
-        const adminCommands = ['tokeninfo','keyhistory','keyinfo','blacklist','backupcheck','backuprestore','adminlist','adminstats','keystats','searchkey'];
+        const adminCommands = ['keylist','keyinfo','blacklist','backupcheck','backuprestore','adminlist','adminstats','searchkey'];
         if (adminCommands.includes(commandName) && !(await isSystemAdmin(userId))) {
             return interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLORS.ERROR).setTitle('❌ TỪ CHỐI TRUY CẬP').setDescription('Chỉ Owner hoặc Admin hệ thống mới được sử dụng lệnh này.').setFooter(getFooterOptions())] });
-        }
-        if (commandName === 'tokenstats') {
-            const [total, used, unused, assigned, unassigned] = await Promise.all([
-                ResetToken.countDocuments(),
-                ResetToken.countDocuments({ is_used: true }),
-                ResetToken.countDocuments({ is_used: false }),
-                ResetToken.countDocuments({ user_id: { $ne: null, $exists: true } }),
-                ResetToken.countDocuments({ $or: [{ user_id: null }, { user_id: { $exists: false } }] })
-            ]);
-            const embed = new EmbedBuilder()
-                .setColor(COLORS.INFO)
-                .setTitle('📊 THỐNG KÊ TOKEN')
-                .addFields(
-                    { name: 'Tổng Token', value: String(total), inline: true },
-                    { name: 'Đã sử dụng', value: String(used), inline: true },
-                    { name: 'Chưa sử dụng', value: String(unused), inline: true },
-                    { name: 'Đã gán User', value: String(assigned), inline: true },
-                    { name: 'Chưa gán User', value: String(unassigned), inline: true }
-                )
-                .setFooter(getFooterOptions());
-            return interaction.editReply({ embeds: [embed] });
         }
         if (commandName === 'adminlist') {
             const rows = await Admin.find({}, {user_id:1,_id:0}).lean();
             return interaction.editReply({ content: `**Owner:** <@${OWNER_ID}>\n**Admin (${rows.length}):**\n${rows.length ? rows.map((a,i)=>`${i+1}. <@${a.user_id}>`).join('\n') : 'Chưa có Admin.'}` });
         }
         if (commandName === 'adminstats') {
-            const [admins, keys, tokens, logs] = await Promise.all([Admin.countDocuments(),Key.countDocuments(),ResetToken.countDocuments(),AuditLog.countDocuments()]);
-            return interaction.editReply({ embeds:[new EmbedBuilder().setColor(COLORS.INFO).setTitle('📊 THỐNG KÊ QUẢN TRỊ').addFields({name:'Admin',value:String(admins),inline:true},{name:'Key',value:String(keys),inline:true},{name:'Token',value:String(tokens),inline:true},{name:'Audit Log',value:String(logs),inline:true}).setFooter(getFooterOptions())] });
-        }
-        if (commandName === 'keystats') {
-            const [total, active, unused, blacklisted, expired] = await Promise.all([Key.countDocuments(),Key.countDocuments({is_used:1,expires_at:0}),Key.countDocuments({is_used:0}),Key.countDocuments({blacklisted_until:{$gt:Date.now()}}),Key.countDocuments({is_used:1,expires_at:{$ne:0,$lt:Date.now()}})]);
-            return interaction.editReply({ embeds:[new EmbedBuilder().setColor(COLORS.INFO).setTitle('📊 THỐNG KÊ KEY').addFields({name:'Tổng Key',value:String(total),inline:true},{name:'Đang hoạt động',value:String(active),inline:true},{name:'Chưa kích hoạt',value:String(unused),inline:true},{name:'Blacklist',value:String(blacklisted),inline:true},{name:'Hết hạn',value:String(expired),inline:true}).setFooter(getFooterOptions())] });
+            const [admins, logs] = await Promise.all([Admin.countDocuments(),AuditLog.countDocuments()]);
+            return interaction.editReply({ embeds:[new EmbedBuilder().setColor(COLORS.INFO).setTitle('📊 THỐNG KÊ QUẢN TRỊ').addFields({name:'Admin',value:String(admins),inline:true},{name:'Audit Log',value:String(logs),inline:true}).setFooter(getFooterOptions())] });
         }
         if (commandName === 'searchkey') {
             const q = interaction.options.getString('query').trim();
@@ -831,24 +804,9 @@ client.on('interactionCreate', async interaction => {
                     .addFields(tokenFields).setFooter(getFooterOptions())] });
             }
         }
-        else if (['tokeninfo', 'keyhistory', 'keyinfo', 'blacklist'].includes(commandName)) {
+        else if (['keylist', 'keyinfo', 'blacklist'].includes(commandName)) {
             if (!(await isSystemAdmin(userId))) {
                 return interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLORS.ERROR).setTitle('❌ TỪ CHỐI TRUY CẬP').setDescription('Chỉ Admin hệ thống mới được sử dụng lệnh này.').setFooter(getFooterOptions())] });
-            }
-            if (commandName === 'tokeninfo') {
-                const tokenValue = interaction.options.getString('token').trim();
-                const tokenRow = await ResetToken.findOne({ token: tokenValue });
-                if (!tokenRow) return interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLORS.ERROR).setTitle('TOKEN KHÔNG TỒN TẠI').setDescription('Không tìm thấy Token trong cơ sở dữ liệu.').setFooter(getFooterOptions())] });
-                const embed = new EmbedBuilder().setColor(tokenRow.is_used ? COLORS.WARNING : COLORS.SUCCESS).setTitle('🔎 THÔNG TIN TOKEN')
-                    .addFields(
-                        { name: 'Token', value: `${tokenRow.token}`, inline: false },
-                        { name: 'Trạng thái', value: tokenRow.is_used ? 'Đã sử dụng' : 'Chưa sử dụng', inline: true },
-                        { name: 'Người được gán', value: tokenRow.user_id ? `<@${tokenRow.user_id}>` : 'Không gán', inline: true },
-                        { name: 'Người sử dụng', value: tokenRow.used_by ? `<@${tokenRow.used_by}>` : 'Chưa có', inline: true },
-                        { name: 'Ngày tạo', value: `<t:${Math.floor(tokenRow.created_at / 1000)}:F>`, inline: false },
-                        { name: 'Ngày sử dụng', value: tokenRow.used_at ? `<t:${Math.floor(tokenRow.used_at / 1000)}:F>` : 'Chưa sử dụng', inline: false }
-                    ).setFooter(getFooterOptions());
-                return interaction.editReply({ embeds: [embed] });
             }
             if (commandName === 'keyinfo') {
                 const value = interaction.options.getString('key').trim();
@@ -871,13 +829,33 @@ client.on('interactionCreate', async interaction => {
                     ).setFooter(getFooterOptions());
                 return interaction.editReply({ embeds: [embed] });
             }
-            if (commandName === 'keyhistory') {
-                const value = interaction.options.getString('key');
-                const filter = value ? { $or: [{ key_value: value.trim() }, { 'details.assigned_key': value.trim() }] } : {};
-                const logs = await AuditLog.find(filter).sort({ created_at: -1 }).limit(10);
-                if (!logs.length) return interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLORS.WARNING).setTitle('CHƯA CÓ LỊCH SỬ').setDescription('Không tìm thấy bản ghi phù hợp.').setFooter(getFooterOptions())] });
-                const lines = logs.map(log => `• **${log.action}** — <t:${Math.floor(log.created_at / 1000)}:R>\n  Key: ${log.key_value || 'N/A'} | User: ${log.actor_id ? `<@${log.actor_id}>` : 'System'}`).join('\n');
-                return interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLORS.INFO).setTitle('📚 LỊCH SỬ KEY / HỆ THỐNG').setDescription(lines.slice(0, 4000)).setFooter(getFooterOptions())] });
+            if (commandName === 'keylist') {
+                const now = Date.now();
+                const [total, redeemed, expired, locked] = await Promise.all([
+                    Key.countDocuments({}),
+                    Key.countDocuments({ user_id: { $ne: null } }),
+                    Key.countDocuments({ user_id: { $ne: null }, expires_at: { $gt: 0, $lt: now } }),
+                    Key.countDocuments({ blacklisted_until: { $gt: now } }),
+                ]);
+                if (!total) return interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLORS.WARNING).setTitle('CHƯA CÓ KEY').setDescription('Hệ thống chưa có key nào.').setFooter(getFooterOptions())] });
+
+                const LIMIT = 40;
+                const rows = await Key.find({}).sort({ created_at: -1 }).limit(LIMIT).lean();
+                const lines = rows.map((r, i) => {
+                    const keyVal = r.assigned_key || r.key || 'N/A';
+                    const who = r.user_id ? `<@${r.user_id}>` : '`Chưa nhập`';
+                    let when;
+                    if (!r.user_id) when = r.duration_days ? `${r.duration_days} ngày (chưa kích hoạt)` : '`Vĩnh viễn` (chưa kích hoạt)';
+                    else if (r.expires_at === 0) when = '`Vĩnh viễn`';
+                    else if (r.expires_at > now) when = `<t:${Math.floor(r.expires_at / 1000)}:R>`;
+                    else when = '`Đã hết hạn`';
+                    const lock = Number(r.blacklisted_until || 0) > now ? ' | 🔒 Đang khóa' : '';
+                    return `**${i + 1}.** \`${keyVal}\` | ${who} | ${when}${lock}`;
+                });
+                const summary = `Tổng: **${total}** · Đã nhập: **${redeemed}** · Chưa nhập: **${total - redeemed}** · Hết hạn: **${expired}** · Đang khóa: **${locked}**`;
+                const note = total > rows.length ? `\n\n_Hiển thị ${rows.length} key mới nhất trên tổng ${total}._` : '';
+                const body = `${summary}\n\n${lines.join('\n')}${note}`;
+                return interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLORS.INFO).setTitle('📋 DANH SÁCH KEY').setDescription(body.slice(0, 4000)).setFooter(getFooterOptions())] });
             }
             if (commandName === 'blacklist') {
                 const value = interaction.options.getString('key').trim();
@@ -1005,13 +983,13 @@ client.on('interactionCreate', async interaction => {
             } else if (now - row.last_reset < cooldown) {
                 const remainingMs = cooldown - (now - row.last_reset);
                 const totalMinutes = Math.ceil(remainingMs / 60000);
-                const hoursLeft = String(Math.floor(totalMinutes / 60)).padStart(2, '0');
-                const minutesLeft = String(totalMinutes % 60).padStart(2, '0');
-                const waitTime = `${hoursLeft}:${minutesLeft}`;
+                const hoursLeft = Math.floor(totalMinutes / 60);
+                const minutesLeft = totalMinutes % 60;
+                const waitTime = `${hoursLeft} giờ ${minutesLeft} phút`;
                 return interaction.editReply({ embeds: [new EmbedBuilder()
                     .setColor(COLORS.ERROR)
                     .setTitle('RESET HWID THẤT BẠI')
-                    .setDescription(`Thực hiện Reset Hwid Thất bại! Bạn Cần Đợi **${waitTime}** Để Tiếp Tục Reset Hwid Hoặc Có Thể Dùng Token Để Thực Hiện Reset Hwid!`)
+                    .setDescription(`Thực hiện Reset HWID thất bại! Bạn cần đợi **${waitTime}** nữa để reset miễn phí, hoặc dùng token để reset.`)
                     .setThumbnail(userAvatar)
                     .setFooter(getFooterOptions())] });
             }
@@ -1119,7 +1097,7 @@ client.on('interactionCreate', async interaction => {
                     .setThumbnail(i.user.displayAvatarURL({ dynamic: true }))
                     .addFields(
                         { name: '⌛ Hạn Sử Dụng', value: expireText(row), inline: true },
-                        { name: '🖥️ Trạng Thái HWID', value: row.hwid ? '🔒 Đã có HWID' : '🔓 Chưa có HWID', inline: true },
+                        { name: '🖥️ Trạng Thái HWID', value: row.hwid ? '🔒 Đã có HWID' : 'N/A', inline: true },
                         { name: '🔄 Trạng Thái Reset', value: resetStatusText, inline: true },
                         { name: '🔑 Your key:', value: row.assigned_key, inline: false }
                     )
