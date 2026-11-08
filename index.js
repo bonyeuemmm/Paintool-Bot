@@ -168,6 +168,26 @@ auditSchema.index({ created_at: -1 });
 auditSchema.index({ key_value: 1, created_at: -1 });
 const AuditLog = mongoose.model('AuditLog', auditSchema);
 
+// Cấu hình dùng chung giữa bot chính và bot admin (ví dụ thời gian chờ reset HWID).
+const settingSchema = new mongoose.Schema({ key: { type: String, unique: true }, value: mongoose.Schema.Types.Mixed });
+const Setting = mongoose.model('Setting', settingSchema);
+
+const DEFAULT_RESET_COOLDOWN_HOURS = 24;
+const RESET_COOLDOWN_MIN_HOURS = 1;
+const RESET_COOLDOWN_MAX_HOURS = 720; // 30 ngày
+let resetCooldownCache = { ms: null, at: 0 };
+async function getResetCooldownMs() {
+    // Cache 60 giây để không đọc database mỗi lần reset
+    if (resetCooldownCache.ms !== null && Date.now() - resetCooldownCache.at < 60000) return resetCooldownCache.ms;
+    let hours = DEFAULT_RESET_COOLDOWN_HOURS;
+    try {
+        const row = await Setting.findOne({ key: 'reset_cooldown_hours' }).lean();
+        if (row && Number.isFinite(Number(row.value))) hours = Number(row.value);
+    } catch (e) { /* giữ mặc định nếu lỗi DB */ }
+    resetCooldownCache = { ms: hours * 60 * 60 * 1000, at: Date.now() };
+    return resetCooldownCache.ms;
+}
+
 async function writeAudit(data) {
     try { await AuditLog.create(data); }
     catch (err) { console.error('[AUDIT] Không ghi được lịch sử:', err.message); }
@@ -408,6 +428,8 @@ const commands = [
     adminOnly(new SlashCommandBuilder().setName('backuprestore').setDescription('Owner: Khôi phục bản sao lưu gần nhất')),
     adminOnly(new SlashCommandBuilder().setName('adminlist').setDescription('Admin: Danh sách Admin')),
     adminOnly(new SlashCommandBuilder().setName('adminstats').setDescription('Admin: Thống kê hệ thống')),
+    adminOnly(new SlashCommandBuilder().setName('setresetcooldown').setDescription('Admin: Đặt thời gian chờ reset HWID của thành viên (giờ)')
+        .addIntegerOption(opt => opt.setName('hours').setDescription('Số giờ (1–720). Để trống để xem hiện tại').setRequired(false).setMinValue(RESET_COOLDOWN_MIN_HOURS).setMaxValue(RESET_COOLDOWN_MAX_HOURS))),
     adminOnly(new SlashCommandBuilder().setName('searchkey').setDescription('Admin: Tìm Key theo mã hoặc Discord UID')
         .addStringOption(opt => opt.setName('query').setDescription('Key gốc, Tool Key hoặc Discord UID').setRequired(true)))
 ];
@@ -628,9 +650,20 @@ async function handleInteraction(interaction) {
     }
 
     try {
-        const adminCommands = ['keylist','keyinfo','blacklist','backupcheck','backuprestore','adminlist','adminstats','searchkey'];
+        const adminCommands = ['keylist','keyinfo','blacklist','backupcheck','backuprestore','adminlist','adminstats','searchkey','setresetcooldown'];
         if (adminCommands.includes(commandName) && !(await isSystemAdmin(userId))) {
             return interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLORS.ERROR).setTitle('❌ TỪ CHỐI TRUY CẬP').setDescription('Chỉ Owner hoặc Admin hệ thống mới được sử dụng lệnh này.').setFooter(getFooterOptions())] });
+        }
+        if (commandName === 'setresetcooldown') {
+            const hoursInput = interaction.options.getInteger('hours');
+            if (hoursInput === null) {
+                const current = Math.round((await getResetCooldownMs()) / 3600000);
+                return interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLORS.INFO).setTitle('⏱️ THỜI GIAN CHỜ RESET HWID').setDescription(`Hiện tại: **${current} giờ** (thành viên thường).`).setFooter(getFooterOptions())] });
+            }
+            await Setting.updateOne({ key: 'reset_cooldown_hours' }, { $set: { value: hoursInput } }, { upsert: true });
+            resetCooldownCache = { ms: null, at: 0 };
+            await writeAudit({ action: 'RESET_COOLDOWN_SET', actor_id: userId, details: { hours: hoursInput } });
+            return interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLORS.GOLD).setTitle('⏱️ ĐÃ CẬP NHẬT').setDescription(`Thời gian chờ reset HWID của thành viên thường là **${hoursInput} giờ**. Có hiệu lực ngay.`).setFooter(getFooterOptions())] });
         }
         if (commandName === 'adminlist') {
             const rows = await Admin.find({}, {user_id:1,_id:0}).lean();
@@ -720,7 +753,7 @@ async function handleInteraction(interaction) {
                     Buffer.from(generatedKeys.join('\n'), 'utf8'),
                     { name: 'PAIN KEY.text' }
                 );
-                await notifyOwner(client, ownerEmbed, [ownerKeyFile]);
+                await notifyOwner(interaction.client, ownerEmbed, [ownerKeyFile]);
             }
 
             if (quantity >= 5) {
@@ -780,7 +813,7 @@ async function handleInteraction(interaction) {
                     )
                     .setFooter(getFooterOptions());
                 const ownerTokenFile = new AttachmentBuilder(Buffer.from(generatedTokens.join('\n'), 'utf8'), { name: 'PAIN TOKEN.text' });
-                await notifyOwner(client, ownerEmbed, [ownerTokenFile]);
+                await notifyOwner(interaction.client, ownerEmbed, [ownerTokenFile]);
             }
 
             if (quantity >= 5) {
@@ -967,7 +1000,7 @@ async function handleInteraction(interaction) {
                 return interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLORS.ERROR).setTitle('❌ KHÔNG THỂ RESET').setDescription('Key của bạn đã hết hạn và hệ thống đã xóa dữ liệu.').setThumbnail(userAvatar).setFooter(getFooterOptions())] });
             }
 
-            const cooldown = 24 * 60 * 60 * 1000;
+            const cooldown = await getResetCooldownMs();
 
             if (tokenInput) {
                 const validToken = await ResetToken.findOneAndUpdate(
@@ -980,7 +1013,8 @@ async function handleInteraction(interaction) {
                 } else {
                     await writeAudit({ action: 'TOKEN_USED', actor_id: userId, token_value: tokenInput, key_value: inputKey });
                 }
-            } else if (now - row.last_reset < cooldown) {
+            } else if (!(await isSystemAdmin(userId)) && now - row.last_reset < cooldown) {
+                // Owner và Admin (cấp bằng /setadmin ở bot admin) reset không giới hạn, không cần token.
                 const remainingMs = cooldown - (now - row.last_reset);
                 const totalMinutes = Math.ceil(remainingMs / 60000);
                 const hoursLeft = Math.floor(totalMinutes / 60);
@@ -1079,7 +1113,7 @@ async function handleInteraction(interaction) {
                     });
                 }
 
-                const cooldown = 24 * 60 * 60 * 1000;
+                const cooldown = await getResetCooldownMs();
 
                 let expireText = r => r.expires_at === 0 ? '`Vĩnh viễn`' : (r.expires_at > currentNow ? `<t:${Math.floor(r.expires_at / 1000)}:R>` : '`Đã hết hạn`');
                 let resetStatusText = '🟢 Sẵn sàng Reset HWID';
