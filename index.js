@@ -17,9 +17,18 @@ const fs = require('fs');
 const zlib = require('zlib');
 const path = require('path');
 
-const TOKEN = process.env.DISCORD_TOKEN;
+// BOT_ROLE: 'main' = bot chính (API, lệnh thành viên, tác vụ nền). 'admin' = bot admin (lệnh quản trị).
+// Mỗi service trên bot-hosting chạy một vai trò, cùng một file này.
+const BOT_ROLE = (process.env.BOT_ROLE || 'main').trim().toLowerCase();
+if (BOT_ROLE !== 'main' && BOT_ROLE !== 'admin') {
+    console.error(`[FATAL] BOT_ROLE phải là 'main' hoặc 'admin' (hiện là '${BOT_ROLE}').`);
+    process.exit(1);
+}
+const IS_MAIN = BOT_ROLE === 'main';
+const IS_ADMIN = BOT_ROLE === 'admin';
 
-if (!TOKEN || typeof TOKEN !== 'string' || TOKEN.trim() === '') {
+const TOKEN = process.env.DISCORD_TOKEN;
+if (IS_MAIN && (!TOKEN || typeof TOKEN !== 'string' || TOKEN.trim() === '')) {
     console.error('[FATAL] DISCORD_TOKEN không tồn tại hoặc không hợp lệ.');
     process.exit(1);
 }
@@ -171,7 +180,7 @@ console.log('🔄 Đang tiến hành kết nối đến MongoDB Atlas...');
 mongoose.connect(MONGODB_URI)
     .then(async () => {
         console.log('✅ Đã kết nối MongoDB Atlas thành công!');
-        backupDatabase();
+        if (IS_MAIN) backupDatabase();
     })
     .catch(err => console.error('❌ Lỗi kết nối MongoDB:', err));
 
@@ -330,7 +339,7 @@ app.post(['/', '/api/verify'], async (req, res) => {
 });
 
 const PORT = Number(process.env.SERVER_PORT || process.env.PORT) || 3000;
-app.listen(PORT, '0.0.0.0', () => {
+if (IS_MAIN) app.listen(PORT, '0.0.0.0', () => {
     console.log(`🌐 API Server đang chạy trên cổng ${PORT}`);
 });
 
@@ -343,6 +352,24 @@ const client = new Client({
         GatewayIntentBits.DirectMessages
     ] 
 });
+
+// ============ BOT ADMIN (token riêng). Thiếu ADMIN_BOT_TOKEN thì chỉ chạy bot chính. ============
+const ADMIN_BOT_TOKEN = IS_ADMIN ? ((process.env.ADMIN_BOT_TOKEN || '').trim() || null) : null;
+if (IS_ADMIN && !ADMIN_BOT_TOKEN) {
+    console.error('[FATAL] BOT_ROLE=admin nhưng thiếu ADMIN_BOT_TOKEN.');
+    process.exit(1);
+}
+const ADMIN_CLIENT_ID_ENV = process.env.ADMIN_CLIENT_ID || null;
+const adminClient = ADMIN_BOT_TOKEN ? new Client({
+    intents: [
+        GatewayIntentBits.Guilds,
+        GatewayIntentBits.GuildMessages,
+        GatewayIntentBits.MessageContent,
+        GatewayIntentBits.GuildMembers,
+        GatewayIntentBits.DirectMessages
+    ]
+}) : null;
+const adminRest = ADMIN_BOT_TOKEN ? new REST({ version: '10' }).setToken(ADMIN_BOT_TOKEN) : null;
 
 const cooldowns = new Map();
 const COOLDOWN_TIME = 5000; 
@@ -506,18 +533,21 @@ client.once('ready', async () => {
     try {
         const appId = CLIENT_ID || client.user.id;
 
-        // Xóa command Global cũ để tránh lệnh Global cũ đè/gây nhầm với Guild Commands.
-        await rest.put(Routes.applicationCommands(appId), { body: [] });
-
+        // Lệnh thành viên: đăng ký GLOBAL và bật cho cả DM, nên hiện ở mọi server lẫn tin nhắn riêng.
         const publicBody = commands.filter(c => PUBLIC_COMMAND_NAMES.includes(c.name));
+        for (const c of publicBody) {
+            if (typeof c.setContexts === 'function') c.setContexts([0, 1, 2]); // guild, DM, DM nhóm
+            else c.setDMPermission(true);
+        }
+        await rest.put(Routes.applicationCommands(appId), { body: publicBody });
         if (!ADMIN_GUILD_ID) {
             console.warn('⚠️ [SLASH] Chưa đặt ADMIN_GUILD_ID: lệnh quản trị sẽ không được đăng ký ở server nào.');
         }
         let successGuilds = 0;
         for (const guild of client.guilds.cache.values()) {
             try {
-                // Server admin: đủ lệnh. Server khác: chỉ lệnh thành viên. rest.put thay toàn bộ danh sách nên lệnh admin cũ bị gỡ.
-                const body = guild.id === ADMIN_GUILD_ID ? commands : publicBody;
+                // Bot chính chỉ đăng ký lệnh thành viên (global). Lệnh admin do bot admin đăng ký: xóa lệnh riêng của guild.
+                const body = [];
                 const registered = await rest.put(
                     Routes.applicationGuildCommands(appId, guild.id),
                     { body }
@@ -530,7 +560,7 @@ client.once('ready', async () => {
         }
 
         console.log(`🌐 Đăng ký Guild Slash Commands hoàn tất: ${successGuilds}/${client.guilds.cache.size} server.`);
-        console.log('🔐 Lệnh quản trị chỉ đăng ký ở server ADMIN_GUILD_ID (server riêng chỉ có Owner/Admin). Các server khác chỉ thấy lệnh thành viên.');
+        console.log('🔐 Lệnh thành viên hiện ở mọi server và DM. Lệnh quản trị do bot admin phục vụ.');
         console.log(`✅ Bot Discord đã sẵn sàng hoạt động: ${client.user.tag}`);
         checkExpiredKeys();
         setInterval(checkExpiredKeys, 60 * 1000);
@@ -540,7 +570,7 @@ client.once('ready', async () => {
     }
 });
 
-client.on('interactionCreate', async interaction => {
+async function handleInteraction(interaction) {
     if (interaction.isAutocomplete()) {
         if (interaction.commandName === 'resethwid') {
             try {
@@ -572,7 +602,7 @@ client.on('interactionCreate', async interaction => {
     const { commandName } = interaction;
 
     // PHẢN HỒI NGAY LẬP TỨC CHO DISCORD TRÁNH LỖI OVER 3S
-    const isPublicCommand = (commandName === 'redeem');
+    const isPublicCommand = ['redeem', 'createkey', 'gettoken'].includes(commandName);
     try {
         await interaction.deferReply({ ephemeral: !isPublicCommand });
     } catch (e) {
@@ -709,25 +739,10 @@ client.on('interactionCreate', async interaction => {
                 value: `${key}`,
                 inline: false
             }));
-            if (targetUser) {
-                try {
-                    const dmEmbed = new EmbedBuilder().setColor(COLORS.GOLD).setTitle('🎉 BẠN ĐÃ NHẬN ĐƯỢC KEY BẢN QUYỀN')
-                        .setDescription(`Quản trị viên đã gửi cho bạn **${quantity} Key** kích hoạt tool premium.\n\n• **Thời hạn:** ${duration === 0 ? 'Vĩnh viễn' : `${duration} ngày`}\n👉 Dùng lệnh /redeem để kích hoạt.`)
-                        .addFields(keyFields).setFooter(getFooterOptions());
-                    await targetUser.send({ embeds: [dmEmbed] });
-                    await interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLORS.GOLD).setTitle('🎟️ KHỞI TẠO KEY THÀNH CÔNG')
-                        .setDescription(`✅ Đã tạo **${quantity} Key** và gửi qua DM cho **${targetUser.tag}**.`)
-                        .addFields(keyFields).setFooter(getFooterOptions())] });
-                } catch (e) {
-                    await interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLORS.WARNING).setTitle('⚠️ TẠO KEY THÀNH CÔNG')
-                        .setDescription(`Không thể gửi DM cho **${targetUser.tag}**. Các Key đã được tạo:`)
-                        .addFields(keyFields).setFooter(getFooterOptions())] });
-                }
-            } else {
-                await interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLORS.GOLD).setTitle('🎟️ KHỞI TẠO KEY THÀNH CÔNG')
-                    .setDescription(`✅ Đã tạo **${quantity} Key** kích hoạt.\n\n• **Thời hạn:** ${duration === 0 ? 'Vĩnh viễn' : `${duration} ngày`}`)
-                    .addFields(keyFields).setFooter(getFooterOptions())] });
-            }
+            const keyNote = targetUser ? `\n• **Dành cho:** <@${targetUser.id}>` : '';
+            await interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLORS.GOLD).setTitle('🎟️ KHỞI TẠO KEY THÀNH CÔNG')
+                .setDescription(`✅ Đã tạo **${quantity} Key** kích hoạt.\n\n• **Thời hạn:** ${duration === 0 ? 'Vĩnh viễn' : `${duration} ngày`}${keyNote}`)
+                .addFields(keyFields).setFooter(getFooterOptions())] });
         }
         else if (commandName === 'gettoken') {
             const isAdmin = await Admin.exists({ user_id: userId });
@@ -784,25 +799,10 @@ client.on('interactionCreate', async interaction => {
                 value: `${token}`,
                 inline: false
             }));
-            if (targetUser) {
-                try {
-                    const dmEmbed = new EmbedBuilder().setColor(COLORS.INFO).setTitle('🔑 BẠN ĐÃ NHẬN TOKEN RESET HWID')
-                        .setDescription(`Dưới đây là **${quantity} Token** dùng để reset HWID:\n\n• Sử dụng kèm trong lệnh /resethwid để bỏ qua thời gian chờ!`)
-                        .addFields(tokenFields).setFooter(getFooterOptions());
-                    await targetUser.send({ embeds: [dmEmbed] });
-                    await interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLORS.INFO).setTitle('✅ TẠO TOKEN THÀNH CÔNG')
-                        .setDescription(`Đã gửi **${quantity} Token** tới **${targetUser.tag}** qua DM.`)
-                        .addFields(tokenFields).setFooter(getFooterOptions())] });
-                } catch (e) {
-                    await interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLORS.WARNING).setTitle('⚠ TẠO TOKEN THÀNH CÔNG')
-                        .setDescription('Không thể gửi DM cho người dùng này. Token đã được tạo:')
-                        .addFields(tokenFields).setFooter(getFooterOptions())] });
-                }
-            } else {
-                await interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLORS.INFO).setTitle('🔑 TOKEN RESET HWID MỚI')
-                    .setDescription(`Đã tạo **${quantity} Token**:`)
-                    .addFields(tokenFields).setFooter(getFooterOptions())] });
-            }
+            const tokenNote = targetUser ? `\n\n• **Dành cho:** <@${targetUser.id}>` : '';
+            await interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLORS.INFO).setTitle('🔑 TOKEN RESET HWID MỚI')
+                .setDescription(`Đã tạo **${quantity} Token**:${tokenNote}`)
+                .addFields(tokenFields).setFooter(getFooterOptions())] });
         }
         else if (['keylist', 'keyinfo', 'blacklist'].includes(commandName)) {
             if (!(await isSystemAdmin(userId))) {
@@ -1124,16 +1124,45 @@ client.on('interactionCreate', async interaction => {
         console.error('❌ Lỗi xử lý lệnh:', error);
         await interaction.editReply({ embeds: [new EmbedBuilder().setColor(COLORS.ERROR).setTitle('❌ LỖI HỆ THỐNG').setDescription('Đã xảy ra lỗi không mong muốn trong quá trình xử lý!').setThumbnail(userAvatar).setFooter(getFooterOptions())] }).catch(() => {});
     }
-});
+}
+
+if (IS_MAIN) client.on('interactionCreate', handleInteraction);
+if (IS_ADMIN && adminClient) adminClient.on('interactionCreate', handleInteraction);
+
+if (IS_ADMIN && adminClient) {
+    adminClient.once('ready', async () => {
+        try {
+            const appId = ADMIN_CLIENT_ID_ENV || adminClient.user.id;
+            // Bot admin không có lệnh toàn cục; chỉ có lệnh quản trị ở server admin.
+            await adminRest.put(Routes.applicationCommands(appId), { body: [] });
+            const adminBody = commands.filter(c => !PUBLIC_COMMAND_NAMES.includes(c.name));
+            if (!ADMIN_GUILD_ID) {
+                console.warn('⚠️ [ADMIN BOT] Chưa đặt ADMIN_GUILD_ID: lệnh quản trị chưa được đăng ký ở đâu.');
+            } else {
+                const registered = await adminRest.put(Routes.applicationGuildCommands(appId, ADMIN_GUILD_ID), { body: adminBody });
+                console.log(`[ADMIN BOT] Đã đăng ký ${registered.length} lệnh quản trị tại server ${ADMIN_GUILD_ID}.`);
+            }
+            console.log(`✅ Bot admin đã sẵn sàng: ${adminClient.user.tag}`);
+        } catch (error) {
+            console.error('❌ [ADMIN BOT] Lỗi đăng ký lệnh quản trị:', error.message || error);
+        }
+    });
+    adminRest.get(Routes.user())
+        .then(user => {
+            console.log(`🔑 Token bot admin hợp lệ: ${user.username}`);
+            return adminClient.login(ADMIN_BOT_TOKEN);
+        })
+        .catch(err => console.error('❌ [ADMIN BOT] Không đăng nhập được:', err.message || err));
+}
 
 console.log('🤖 Đang tiến hành kiểm tra Token và đăng nhập bot Discord...');
 
-const loginTimeout = setTimeout(() => {
+const loginTimeout = !IS_MAIN ? null : setTimeout(() => {
     console.error('❌ [CRITICAL] Kết nối Discord Gateway bị chặn/treo!');
 }, 12000);
 
 // Kiểm tra Token trực tiếp qua Rest API trước khi mở WebSocket
-rest.get(Routes.user())
+if (IS_MAIN) rest.get(Routes.user())
     .then(user => {
         console.log(`🔑 Token hợp lệ! Đã xác thực tài khoản Bot: ${user.username}#${user.discriminator}`);
         return client.login(TOKEN);
