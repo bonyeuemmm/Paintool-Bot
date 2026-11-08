@@ -1136,6 +1136,9 @@ if (adminClient) {
             // Bot admin không có lệnh toàn cục; chỉ có lệnh quản trị ở server admin.
             await adminRest.put(Routes.applicationCommands(appId), { body: [] });
             const adminBody = commands.filter(c => !PUBLIC_COMMAND_NAMES.includes(c.name));
+            // Server admin chỉ có owner/admin của bot, nên mở lệnh cho mọi thành viên của server này.
+            // Quyền thật vẫn được kiểm tra trong code bằng isSystemAdmin.
+            adminBody.forEach(c => c.setDefaultMemberPermissions(null));
             if (!ADMIN_GUILD_ID) {
                 console.warn('⚠️ [ADMIN BOT] Chưa đặt ADMIN_GUILD_ID: lệnh quản trị chưa được đăng ký ở đâu.');
             } else {
