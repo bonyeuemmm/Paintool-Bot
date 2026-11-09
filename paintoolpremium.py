@@ -3,7 +3,6 @@ import sys
 import time
 import subprocess
 import json
-import base64
 import random
 import string
 import threading
@@ -765,7 +764,7 @@ def schedule_stop_due():
 
 def ask_main(label):
     print(f" {C.PUR}›{C.R} {C.WHT}{label}{C.R} ", end="", flush=True)
-    if not _valid_hhmm(SCHEDULE.get("start")) and not MUSIC_TIMER.get("enabled"):
+    if not _valid_hhmm(SCHEDULE.get("start")):
         return input()
     while True:
         try:
@@ -777,10 +776,6 @@ def ask_main(label):
             if not line:
                 raise EOFError
             return line.rstrip("\n")
-        try:
-            music_timer_tick()
-        except Exception:
-            pass
         if schedule_start_due():
             print()
             msg_info(f"Đến giờ hẹn {SCHEDULE['start']}: tự động Start...")
@@ -1285,16 +1280,6 @@ def load_saved_config():
             ANTI_BAN["risk_threshold"] = _ban["risk_threshold"]
         if isinstance(_ban.get("pause_minutes"), int):
             ANTI_BAN["pause_minutes"] = _ban["pause_minutes"]
-    _mt = data.get("music_timer", {})
-    if isinstance(_mt, dict):
-        MUSIC_TIMER["enabled"] = bool(_mt.get("enabled", False))
-        MUSIC_TIMER["url"] = str(_mt.get("url", ""))
-        MUSIC_TIMER["start"] = str(_mt.get("start", ""))
-        MUSIC_TIMER["last_run"] = str(_mt.get("last_run", ""))
-        try:
-            MUSIC_TIMER["minutes"] = max(1, min(600, int(_mt.get("minutes", 30))))
-        except Exception:
-            pass
     _afk = data.get("anti_afk", {})
     if isinstance(_afk, dict):
         if isinstance(_afk.get("enabled"), bool):
@@ -1475,7 +1460,6 @@ def _build_config_dict():
             "executor_binding": EXECUTOR_BINDING,
             "package_games": PACKAGE_GAMES,
             "anti_afk": ANTI_AFK,
-            "music_timer": MUSIC_TIMER,
             "ai_settings": AI_SETTINGS,
             "screen_ai": {
                 "enabled": SCREEN_AI.get("enabled"),
@@ -1717,14 +1701,11 @@ def _confirm_exit():
         running = get_running_packages() or []
     except Exception:
         running = []
-    music_on = _music_playing()
-    if not running and not music_on:
+    if not running:
         return True
     print(f"\n {C.YEL}Đang chạy:{C.R}")
     for pkg in running:
         print(f"   - Tab: {tab_label(pkg)}")
-    if music_on:
-        print("   - Nhạc YouTube (sẽ dừng khi thoát tool)")
     print(f" {C.GRY}Các tab game vẫn chạy trên máy sau khi thoát.{C.R}")
     try:
         return ask("Thoát tool? (y/n):").strip().lower() in ("y", "yes")
@@ -1742,7 +1723,6 @@ def exit_tool():
     except Exception:
         pass
     finally:
-        _music_cleanup_at_exit()
         # Clean exit - force sys.exit to prevent hanging threads/segfault
         import os
         os._exit(0)  # Force exit without cleanup that might crash
@@ -1988,10 +1968,6 @@ def kick_out(message):
     except Exception:
         pass
     try:
-        _music_cleanup_at_exit()
-    except Exception:
-        pass
-    try:
         os.remove(LICENSE_FILE)
     except Exception:
         pass
@@ -2171,13 +2147,10 @@ def check_license_curl(key):
         print("[!] Key không được để trống!")
         return False, "[!] Key không được để trống!"
 
-    # HWID chính: băm từ phần cứng (serial, SoC, eMMC, thông số máy) — copy file không làm trùng.
-    # legacy_hwid: UUID file cũ, gửi kèm để server chuyển key đã gắn từ bản trước sang HWID mới.
-    hwid = get_device_profile()["hwid"]
-    legacy_hwid = get_device_hwid()
+    hwid = get_device_hwid()
     timestamp = int(time.time())
 
-    # Tạo chữ ký HMAC-SHA256 bảo mật khớp với index.js (chỉ ký hwid chính)
+    # Tạo chữ ký HMAC-SHA256 bảo mật khớp với index.js
     raw_data = f"{key}:{hwid}:{timestamp}"
     signature = hmac.new(
         SECRET_KEY.encode("utf-8"),
@@ -2188,7 +2161,6 @@ def check_license_curl(key):
     payload = {
         "key": key,
         "hwid": hwid,
-        "legacy_hwid": legacy_hwid,
         "timestamp": timestamp,
         "signature": signature,
     }
@@ -2247,7 +2219,6 @@ def check_license_curl(key):
             if data.get("valid") is True:
                 LAST_LICENSE_EXPIRES = data.get("expires", "")
                 LAST_LICENSE_REASON = "ok"
-                _apply_server_ai_keys(data.get("code"))
                 return True, "[+] Kích hoạt bản quyền thành công!"
 
             reason = data.get("reason", "server_error")
@@ -2858,32 +2829,6 @@ def _ai_client(idx):
     except Exception:
         return None
     return _AI_CLIENTS[idx]
-
-def _apply_server_ai_keys(encoded_code):
-    """Lấy các khóa Cohere từ mã server trả về (server đã thay PASTE_KEY_x_HERE bằng khóa thật).
-    Khóa chỉ giữ trong bộ nhớ, không ghi ra đĩa. Trả về True nếu có ít nhất một khóa hợp lệ."""
-    global AI_API_KEY, AI_ENABLED
-    if not encoded_code:
-        return False
-    try:
-        code = base64.b64decode(encoded_code).decode("utf-8", errors="replace")
-    except Exception:
-        return False
-    block = re.search(r"AI_KEYS_INLINE\s*=\s*\[(.*?)\]", code, re.S)
-    if not block:
-        return False
-    keys = [k.strip() for k in re.findall(r'"([^"]*)"', block.group(1))][:len(AI_KEYS_INLINE)]
-    if not keys:
-        return False
-    keys += [""] * (len(AI_KEYS_INLINE) - len(keys))
-    AI_KEYS_INLINE[:] = keys
-    AI_API_KEY = AI_KEYS_INLINE[0]
-    _AI_CLIENTS.clear()
-    try:
-        init_ai()
-    except Exception:
-        pass
-    return any(_ai_key_is_set(k) for k in keys)
 
 def init_ai():
     global _AI_CLIENT, AI_ENABLED
@@ -4500,10 +4445,10 @@ def get_active_packages():
     else:
         base = list(PACKAGE_GAMES.keys())
 
-    if SELECT_ALL_PACKAGES or not SELECTED_PACKAGES:
+    picked = [p for p in SELECTED_PACKAGES if p in base]
+    if SELECT_ALL_PACKAGES or not picked:
         return base
-    else:
-        return [p for p in SELECTED_PACKAGES if p in base]
+    return picked
 
 def get_running_packages():
     """Package thực sự được chạy: có trong prefix và trong danh sách đã chọn"""
@@ -4616,16 +4561,15 @@ def preflight_gate():
     return True
 
 def _ask_close_all_after_zero():
-    """Sau khi bấm 0 để dừng Start: hỏi có tắt tất cả tab game và nhạc không. Trả về mô tả để ghi nhật ký."""
+    """Sau khi bấm 0 để dừng Start: hỏi có tắt tất cả tab game không. Trả về mô tả để ghi nhật ký."""
     try:
         pkgs = get_running_packages() or []
     except Exception:
         pkgs = []
-    music_on = _music_playing()
-    if not pkgs and not music_on:
+    if not pkgs:
         return ""
-    print(f"\n\033[1;33m[?] Đang còn chạy: {len(pkgs)} tab game" + (" và nhạc YouTube" if music_on else "") + "\033[0m")
-    ans = ask("Tắt tất cả trường trình (tab game + nhạc)? y = tắt, n = bỏ qua:").strip().lower()
+    print(f"\n\033[1;33m[?] Đang còn chạy: {len(pkgs)} tab game\033[0m")
+    ans = ask("Tắt tất cả tab game? y = tắt, n = bỏ qua:").strip().lower()
     if ans not in ("y", "yes"):
         return " | giữ nguyên các tab đang chạy"
     for pkg in pkgs:
@@ -4633,9 +4577,7 @@ def _ask_close_all_after_zero():
             close_game(pkg)
         except Exception:
             pass
-    if music_on:
-        music_stop()
-    return f" | đã tắt {len(pkgs)} tab" + (" và nhạc" if music_on else "")
+    return f" | đã tắt {len(pkgs)} tab"
 
 # ==================== UPGRADE #1: BAN WAVE PREDICTOR ====================
 BAN_WAVE_HISTORY = {}  # {pkg: [{"time": timestamp, "code": "262", "count": 1}, ...]}
@@ -5087,7 +5029,6 @@ def start_tool():
         name = signal.Signals(signum).name
         log_event("STOP", detail=f"Nhận tín hiệu {name} (Termux bị đóng / tool bị kill)")
         notify_tool_stopped(f"Tool bị đóng đột ngột (tín hiệu {name})", unexpected=True)
-        _music_cleanup_at_exit()
         raise SystemExit(0)
 
     old_handlers = {}
@@ -5288,10 +5229,6 @@ def start_tool():
                 except Exception:
                     pass
                 # === END UPGRADE INTEGRATIONS ===
-                try:
-                    music_timer_tick()
-                except Exception:
-                    pass
                 try:
                     _storage_watch()
                 except Exception:
@@ -5875,9 +5812,8 @@ def show_banner():
         ("12", "Xem log"),
         ("13", "Gán executor"),
         ("14", "Anti-AFK"),
-        ("15", "Nghe nhạc"),
-        ("16", "Dừng khẩn cấp"),
-        ("17", "Cài đặt"),
+        ("15", "Dừng khẩn cấp"),
+        ("16", "Cài đặt"),
         ("0", "Exit"),
     ]
 
@@ -6281,7 +6217,7 @@ def pick_login_package():
             msg_err("Số không hợp lệ.")
             continue
         if not PKG_NAME_RX.fullmatch(raw):
-            msg_err("Package name không hợp lệ (ví dụ: com.roblox.client).")
+            msg_err("Package name không hợp lệ (ví dụ: com.roblox.clone1).")
             continue
         if raw in pkgs or "package:" in sh(f"pm path {raw}", timeout=8):
             return raw
@@ -6330,7 +6266,7 @@ def login_one_cookie(cookie, idx, total):
         if open_game(pkg, hard=True, enter_map=bool(TARGET_LINK)):
             msg_ok("Đã gửi lệnh mở tab.")
             if not TARGET_LINK:
-                msg_info("Chưa chọn game nên chỉ mở app (Set up > Chọn game để tự vào Map).")
+                msg_info("Chưa chọn game nên chỉ mở app (Set up game để tự vào Map).")
         else:
             msg_err("Không mở được tab, thử mở bằng tay hoặc mục [8].")
     return True
@@ -6346,13 +6282,13 @@ def cookie_login_submenu():
         print(f" {C.LPUR}[1]{C.R} {C.WHT}Dán cookie trực tiếp{C.R}")
         print(f" {C.LPUR}[2]{C.R} {C.WHT}Đọc từ file{C.R} {C.GRY}(mỗi dòng 1 cookie){C.R}")
         print(f" {C.LPUR}[3]{C.R} {C.WHT}Lấy từ clipboard{C.R} {C.GRY}(cần Termux:API){C.R}")
-        print(f" {C.LPUR}[4]{C.R} {C.WHT}Batch auto{C.R}")
+        print(f" {C.LPUR}[4]{C.R} {C.WHT}Batch tự động{C.R}")
         print(f" {C.RED}[0] Quay lại{C.R}")
         print()
         sub = ask("Chọn:").strip()
         if sub == "0":
             announce_choice("0", "Quay lại")
-            msg_info("Quay lại menu chính...")
+            msg_info("Quay lại menu cookie...")
             time.sleep(0.6)
             return
         if sub not in ("1", "2", "3", "4"):
@@ -6365,8 +6301,8 @@ def cookie_login_submenu():
             continue
 
         if sub == "4":
-            announce_choice("4", "Batch auto")
-            # Batch auto: lấy danh sách tab, ghép cookie theo thứ tự
+            announce_choice("4", "Batch tự động")
+            # Batch tự động: lấy danh sách tab, ghép cookie theo thứ tự
             pkgs = list_installed_packages()
             if not pkgs:
                 msg_err(f"Không tìm thấy package nào khớp '{PACKAGE_PREFIX}'.")
@@ -6443,6 +6379,7 @@ def cookie_login_submenu():
                 continue
             raw_list = text.splitlines()
         else:
+            announce_choice("3", "Lấy từ clipboard")
             text = run_cmd(["termux-clipboard-get"], timeout=8)
             if not text.strip():
                 msg_err("Không đọc được clipboard. Cần: pkg install termux-api + cài app Termux:API, hoặc dùng cách [1].")
@@ -6667,7 +6604,7 @@ def menu_cookie_roblox():
         print(f"{C.LPUR}[1]{C.R} {C.WHT}Đăng nhập cookie{C.R}")
         print()
         
-        print(f"{C.LPUR}[2]{C.R} {C.WHT}Lấy cookie account{C.R}")
+        print(f"{C.LPUR}[2]{C.R} {C.WHT}Lấy cookie tài khoản{C.R}")
         
         print(f"{C.RED}[0] Quay lại menu chính{C.R}\n")
         
@@ -6677,7 +6614,7 @@ def menu_cookie_roblox():
             announce_choice("1", "Đăng nhập cookie")
             cookie_login_submenu()
         elif choice == "2":
-            announce_choice("2", "Lấy cookie account")
+            announce_choice("2", "Lấy cookie tài khoản")
             get_cookie_account()
         elif choice == "0":
             announce_choice("0", "Quay lại")
@@ -6785,257 +6722,25 @@ def menu_anti_afk():
         else:
             invalid_choice(sub)
 
-# ==================== NGHE NHẠC YOUTUBE ====================
-MUSIC = {"proc": None, "url": ""}
 
-def _music_playing():
-    p = MUSIC.get("proc")
-    if p is not None:
-        return p.poll() is None
-    return bool(MUSIC.get("termux") and MUSIC.get("url"))
 
-_MUSIC_FLASH = {"msg": "", "ok": True}
 
-def _music_flash(ok, text):
-    """Lưu thông báo để hiển thị sau khi màn hình được vẽ lại (không bị xóa ngay)."""
-    _MUSIC_FLASH["ok"] = ok
-    _MUSIC_FLASH["msg"] = text
 
-def _music_status_block(url_hint=None):
-    """Dòng trạng thái đang phát và thông báo vừa xảy ra, in ngay dưới tiêu đề."""
-    if _music_playing():
-        cur = MUSIC.get("url", "")
-        print(f" {C.GRN}▶ ĐANG PHÁT{C.R} {C.GRY}{cur[:60]}{C.R}")
-    if _MUSIC_FLASH["msg"]:
-        col = C.GRN if _MUSIC_FLASH["ok"] else C.RED
-        print(f" {col}{_MUSIC_FLASH['msg']}{C.R}")
-        _MUSIC_FLASH["msg"] = ""
-    if _music_playing():
-        print()
 
-def _music_wake(on):
-    """Giữ Termux thức khi đang phát nhạc, để Android không tạm dừng khi tắt màn hình."""
-    import subprocess
-    cmd = "termux-wake-lock" if on else "termux-wake-unlock"
-    if shutil.which(cmd):
-        try:
-            subprocess.run([cmd], timeout=5, stdin=subprocess.DEVNULL,
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except Exception:
-            pass
 
-def _ytdlp_cmd():
-    """Trả về lệnh chạy yt-dlp (list) hoặc None. Tìm cả trong ~/.local/bin và bản cài dạng module."""
-    p = shutil.which("yt-dlp")
-    if not p:
-        for d in (os.path.expanduser("~/.local/bin"), "/data/data/com.termux/files/usr/bin"):
-            c = os.path.join(d, "yt-dlp")
-            if os.path.isfile(c) and os.access(c, os.X_OK):
-                p = c
-                break
-    if p:
-        return [p]
-    try:
-        import importlib.util
-        if importlib.util.find_spec("yt_dlp"):
-            return [sys.executable, "-m", "yt_dlp"]
-    except Exception:
-        pass
-    return None
 
-def music_stop():
-    import subprocess
-    p = MUSIC.get("proc")
-    if p is not None and p.poll() is None:
-        _music_wake(False)
-        try:
-            p.terminate()
-            p.wait(timeout=3)
-        except Exception:
-            try:
-                p.kill()
-            except Exception:
-                pass
-    if MUSIC.get("termux") and shutil.which("termux-media-player"):
-        try:
-            subprocess.run(["termux-media-player", "stop"], timeout=10, stdin=subprocess.DEVNULL,
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except Exception:
-            pass
-    MUSIC["termux"] = False
-    MUSIC["proc"] = None
-    MUSIC["url"] = ""
 
-def _is_youtube_url(url):
-    low = url.lower()
-    return low.startswith(("https://", "http://")) and ("youtube.com/" in low or "youtu.be/" in low)
 
 # Các client YouTube thử lần lượt khi bị yêu cầu đăng nhập ("not a bot")
-_YT_CLIENTS = ["android", "ios", "tv_embedded", "mweb"]
 
-def _ytdlp_youtube_bypass_args(client="android"):
-    """Tham số giúp né bước 'Sign in to confirm you're not a bot' của YouTube.
-    Giả lập một client (android/ios/tv_embedded/mweb). Nếu có file cookie
-    (~/.pain_music_cookies.txt, export từ trình duyệt đã đăng nhập YouTube)
-    thì dùng thêm cookie đó để tăng tỉ lệ thành công."""
-    args = ["--extractor-args", f"youtube:player_client={client}"]
-    cookie_path = os.path.join(os.path.expanduser("~"), ".pain_music_cookies.txt")
-    if os.path.isfile(cookie_path):
-        args += ["--cookies", cookie_path]
-    return args
 
-def _music_fail_reason(reason):
-    """Thêm gợi ý tiếng Việt khi gặp đúng lỗi 'not a bot' của YouTube."""
-    if "sign in to confirm" in reason.lower() or "not a bot" in reason.lower():
-        return (f"{reason[:160]} — YouTube chặn vì nghi ngờ bot (hay gặp với IP máy chủ/cloud). "
-                f"Tool đã tự thử bằng client Android, nếu vẫn lỗi: lưu cookie đã đăng nhập YouTube "
-                f"(xuất từ trình duyệt) vào ~/.pain_music_cookies.txt rồi thử lại.")
-    return reason[:160]
 
-def music_play(url):
-    """Phát âm thanh của link YouTube ở nền. Trả về (ok, thông_tin)."""
-    import subprocess
-    if not _is_youtube_url(url):
-        return False, "link không phải YouTube (cần youtube.com hoặc youtu.be)"
-    music_stop()
-    ytdlp = _ytdlp_cmd()
-    bypass = _ytdlp_youtube_bypass_args()
-    err_path = os.path.join(os.path.expanduser("~"), ".pain_music_err.txt")
-    if shutil.which("mpv"):
-        # mpv gọi yt-dlp để lấy luồng âm thanh; chỉ phát video đầu tiên, bỏ qua playlist
-        # ytdl_raw_options truyền thẳng tham số cho yt-dlp bên trong mpv (dạng key=value, nối bằng ,)
-        raw_opts = "no-playlist=,extractor-args=youtube:player_client=android"
-        cookie_path = os.path.join(os.path.expanduser("~"), ".pain_music_cookies.txt")
-        if os.path.isfile(cookie_path):
-            raw_opts += f",cookies={cookie_path}"
-        cmd = ["mpv", "--no-video", "--msg-level=all=error",
-               f"--script-opts=ytdl_hook-ytdl_raw_options={raw_opts}"]
-        if ytdlp and len(ytdlp) == 1:
-            cmd.append("--script-opts=ytdl_hook-ytdl_path=" + ytdlp[0])
-        cmd.append(url)
-    elif ytdlp and shutil.which("termux-media-player"):
-        # Không mở link trực tiếp: tải âm thanh về file rồi phát file bằng termux-media-player
-        audio = os.path.join(os.path.expanduser("~"), ".pain_music.m4a")
-        dl = None
-        reason = "không rõ lý do"
-        for client in _YT_CLIENTS:
-            try:
-                dl = subprocess.run(ytdlp + ["-f", "bestaudio[ext=m4a]/bestaudio", "--no-playlist", "--no-part",
-                                             "--force-overwrites"] + _ytdlp_youtube_bypass_args(client) + ["-o", audio, url],
-                                    capture_output=True, text=True, encoding="utf-8", errors="replace",
-                                    timeout=240, stdin=subprocess.DEVNULL)
-            except subprocess.TimeoutExpired:
-                return False, "tải âm thanh quá lâu (hết 4 phút cho một client), thử link khác"
-            if dl.returncode == 0 and os.path.exists(audio):
-                break
-            tail = [x.strip() for x in (dl.stderr or "").splitlines() if x.strip()]
-            reason = tail[-1] if tail else "không rõ lý do"
-            # chỉ đổi client khi YouTube yêu cầu đăng nhập/nghi bot; lỗi khác thì dừng luôn
-            low = reason.lower()
-            if not ("sign in" in low or "not a bot" in low):
-                break
-        if dl is None or dl.returncode != 0 or not os.path.exists(audio):
-            return False, f"yt-dlp không tải được âm thanh ({_music_fail_reason(reason)})"
-        try:
-            res = subprocess.run(["termux-media-player", "play", audio], capture_output=True, text=True,
-                                 encoding="utf-8", errors="replace", timeout=20, stdin=subprocess.DEVNULL)
-        except Exception as e:
-            return False, f"không chạy được termux-media-player ({e})"
-        if res.returncode != 0:
-            detail = ((res.stderr or res.stdout or "").strip().splitlines() or ["không rõ lý do"])[-1]
-            return False, f"termux-media-player lỗi: {detail[:160]}. Hãy cài app Termux:API và cấp quyền cho nó"
-        MUSIC["proc"] = None
-        MUSIC["url"] = url
-        MUSIC["termux"] = True
-        try:
-            _music_history_add(url)
-        except Exception:
-            pass
-        _music_wake(True)
-        return True, "đang phát ở nền"
-    else:
-        return False, "chưa có trình phát: chạy  pkg install mpv  và  pip install -U yt-dlp"
-    try:
-        errf = open(err_path, "w", encoding="utf-8")
-        proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                stderr=errf, start_new_session=True)
-    except Exception as e:
-        return False, f"không mở được trình phát: {e}"
-    time.sleep(3)
-    if proc.poll() is not None:
-        reason = ""
-        try:
-            with open(err_path, "r", encoding="utf-8", errors="replace") as f:
-                lines = [x.strip() for x in f if x.strip()]
-            reason = lines[-1] if lines else ""
-        except Exception:
-            pass
-        hint = "thử cập nhật: pip install -U yt-dlp"
-        return False, f"trình phát thoát ngay ({reason[:160]}) — {hint}" if reason else f"trình phát thoát ngay — {hint}"
-    MUSIC["proc"] = proc
-    MUSIC["url"] = url
-    try:
-        _music_history_add(url)
-    except Exception:
-        pass
-    _music_wake(True)
-    return True, "đang phát ở nền"
 
-def music_guide():
-    clear_screen()
-    section_title("HƯỚNG DẪN NGHE NHẠC YOUTUBE")
-    lines = [
-        ("1. Cài công cụ (chạy một lần trong Termux):", C.WHT),
-        ("     pkg install mpv", C.GRN),
-        ("     pip install -U yt-dlp", C.GRN),
-        ("", ""),
-        ("2. Lấy link: mở video trên YouTube, bấm Chia sẻ, Sao chép liên kết.", C.WHT),
-        ("   Link dạng youtube.com/watch?v=... hoặc youtu.be/... đều được.", C.GRY),
-        ("", ""),
-        ("3. Phát: chọn [1], dán link, Enter. Nhạc chạy ở nền.", C.WHT),
-        ("   Playlist chỉ phát video đầu tiên.", C.GRY),
-        ("", ""),
-        ("4. Dừng: chọn [2]. Nhạc cũng dừng nếu bạn đổi link mới.", C.WHT),
-        ("   Khi thoát tool, nhạc tự dừng. Nhạc vẫn phát khi tắt màn hình.", C.GRY),
-        ("   Khi đang phát, tool giữ Termux thức (termux-wake-lock) và nhả khi dừng.", C.GRY),
-        ("", ""),
-        ("Không có mpv? Tool dùng yt-dlp + termux-media-player.", C.GRY),
-        ("   Cần cài app Termux:API và: pkg install termux-api", C.GRY),
-        ("", ""),
-        ("Lỗi thường gặp:", C.WHT),
-        ("   - Trình phát thoát ngay: cập nhật yt-dlp (pip install -U yt-dlp).", C.GRY),
-        ("   - Không lấy được luồng: video bị giới hạn vùng, riêng tư, hoặc cần đăng nhập.", C.GRY),
-        ("", ""),
-        ("Lưu ý: phát qua yt-dlp không nằm trong điều khoản của YouTube, cân nhắc trước khi dùng.", C.YEL),
-    ]
-    for text, color in lines:
-        print(f" {color}{text}{C.R}" if color else "")
-    wait_enter()
 
-def _music_cleanup_at_exit():
-    try:
-        music_stop()
-    except Exception:
-        pass
-    _music_wake(False)
 
-import atexit as _atexit
-_atexit.register(_music_cleanup_at_exit)
 
 # ==================== KIỂM TRA / CẬP NHẬT YT-DLP ====================
-def _ytdlp_version_local():
-    cmd = _ytdlp_cmd()
-    if not cmd:
-        return None
-    out = run_cmd(cmd + ["--version"], timeout=15)
-    return out.strip().splitlines()[0] if out and out.strip() else None
 
-def _ytdlp_version_latest():
-    out = run_cmd(["curl", "-s", "-m", "10", "https://pypi.org/pypi/yt-dlp/json"], timeout=15)
-    try:
-        return json.loads(out)["info"]["version"]
-    except Exception:
-        return None
 
 def _ver_key(v):
     try:
@@ -7043,212 +6748,15 @@ def _ver_key(v):
     except Exception:
         return ()
 
-def ytdlp_status():
-    """Trả về (bản_đang_dùng, bản_mới_nhất, cần_cập_nhật)."""
-    cur = _ytdlp_version_local()
-    latest = _ytdlp_version_latest()
-    outdated = bool(cur and latest and _ver_key(cur) < _ver_key(latest))
-    return cur, latest, outdated
 
-def ytdlp_update():
-    """Cập nhật yt-dlp bằng pip. Trả về (ok, thông_tin)."""
-    import subprocess
-    try:
-        res = subprocess.run([sys.executable, "-m", "pip", "install", "-U", "yt-dlp"],
-                             capture_output=True, text=True, encoding="utf-8", errors="replace",
-                             timeout=300, stdin=subprocess.DEVNULL)
-    except Exception as e:
-        return False, f"không chạy được pip: {e}"
-    if res.returncode != 0:
-        tail = (res.stderr or res.stdout or "").strip().splitlines()[-1:] or [""]
-        return False, f"pip lỗi: {tail[0][:120]}"
-    return True, _ytdlp_version_local() or "đã cập nhật"
 
-def menu_ytdlp_check():
-    clear_screen()
-    section_title("KIỂM TRA / CẬP NHẬT YT-DLP")
-    if not _ytdlp_cmd():
-        msg_warn("Chưa cài yt-dlp. Chạy: pip install -U yt-dlp")
-        wait_enter()
-        return
-    msg_info("Đang kiểm tra phiên bản...")
-    cur, latest, outdated = ytdlp_status()
-    print(f" Đang dùng: {C.WHT}{cur or '?'}{C.R}")
-    print(f" Mới nhất: {C.WHT}{latest or 'không kiểm tra được (cần mạng)'}{C.R}")
-    if not latest:
-        msg_warn("Không lấy được phiên bản mới nhất từ PyPI.")
-        wait_enter()
-        return
-    if not outdated:
-        msg_done("yt-dlp đã là bản mới nhất.")
-        wait_enter()
-        return
-    if ask("Cập nhật ngay? (y/n):").strip().lower() not in ("y", "yes"):
-        msg_cancel("Đã hủy cập nhật.")
-        wait_enter()
-        return
-    msg_info("Đang cập nhật, có thể mất vài phút...")
-    ok, info = ytdlp_update()
-    (msg_done if ok else msg_err)(f"Cập nhật xong: yt-dlp {info}." if ok else f"Cập nhật thất bại: {info}")
-    wait_enter()
 
-MUSIC_STORE = os.path.join(os.path.expanduser("~"), ".pain_music.json")
 
-def _music_store_load():
-    try:
-        with open(MUSIC_STORE, "r", encoding="utf-8") as f:
-            d = json.load(f)
-        if isinstance(d, dict):
-            d.setdefault("history", [])
-            d.setdefault("favorites", [])
-            return d
-    except Exception:
-        pass
-    return {"history": [], "favorites": []}
 
-def _music_store_save(d):
-    try:
-        with open(MUSIC_STORE, "w", encoding="utf-8") as f:
-            json.dump(d, f, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
 
-def _music_history_add(url):
-    d = _music_store_load()
-    d["history"] = ([{"url": url, "time": datetime.now().strftime("%Y-%m-%d %H:%M")}]
-                    + [h for h in d["history"] if h.get("url") != url])[:30]
-    _music_store_save(d)
 
-def menu_music_history():
-    while True:
-        clear_screen()
-        section_title("LỊCH SỬ NGHE NHẠC")
-        _music_status_block()
-        items = _music_store_load()["history"]
-        if not items:
-            print(f" {C.GRY}Chưa có bài nào.{C.R}")
-        for i, h in enumerate(items, 1):
-            mark = f"{C.GRN}▶{C.R} " if _music_playing() and h.get("url") == MUSIC.get("url") else "  "
-            print(f"{mark}{C.LPUR}{i:2}.{C.R} {C.GRY}{h.get('time', '')}{C.R} {h.get('url', '')[:60]}")
-        print(f"\n {C.GRY}Nhập số để phát lại · 0 quay lại{C.R}")
-        raw = ask("Chọn:").strip()
-        if raw in ("", "0"):
-            return
-        if raw.isdigit() and 1 <= int(raw) <= len(items):
-            msg_info("Đang mở nhạc...")
-            ok, info = music_play(items[int(raw) - 1]["url"])
-            _music_flash(ok, "Đang phát ở nền." if ok else f"Không phát được: {info}")
-        else:
-            invalid_choice(raw)
-            time.sleep(0.8)
 
-def menu_music_favorites():
-    while True:
-        clear_screen()
-        section_title("NHẠC YÊU THÍCH")
-        _music_status_block()
-        d = _music_store_load()
-        favs = d["favorites"]
-        if not favs:
-            print(f" {C.GRY}Chưa có bài yêu thích.{C.R}")
-        for i, f in enumerate(favs, 1):
-            print(f"  {C.LPUR}{i:2}.{C.R} {C.WHT}{f.get('name', '')}{C.R} {C.GRY}{f.get('url', '')[:50]}{C.R}")
-        print(f"\n {C.GRY}Nhập số để phát · + thêm · - xóa · 0 quay lại{C.R}")
-        raw = ask("Chọn:").strip().lower()
-        if raw in ("", "0"):
-            return
-        if raw == "+":
-            name = ask("Tên gợi nhớ:").strip()
-            url = ask("Link YouTube:").strip()
-            if not name or not _is_youtube_url(url):
-                msg_err("Cần tên và link YouTube hợp lệ.")
-            else:
-                favs.append({"name": name[:40], "url": url})
-                _music_store_save(d)
-                msg_done("Đã thêm vào yêu thích.")
-            time.sleep(1)
-        elif raw == "-":
-            num = ask("Số cần xóa:").strip()
-            if num.isdigit() and 1 <= int(num) <= len(favs):
-                favs.pop(int(num) - 1)
-                _music_store_save(d)
-                msg_done("Đã xóa.")
-            time.sleep(1)
-        elif raw.isdigit() and 1 <= int(raw) <= len(favs):
-            msg_info("Đang mở nhạc...")
-            ok, info = music_play(favs[int(raw) - 1]["url"])
-            _music_flash(ok, "Đang phát ở nền." if ok else f"Không phát được: {info}")
-        else:
-            invalid_choice(raw)
-            time.sleep(0.8)
 
-def menu_music():
-    while True:
-        clear_screen()
-        section_title("NGHE NHẠC YOUTUBE")
-        if _music_playing():
-            print(f" Trạng thái: {C.GRN}ĐANG PHÁT{C.R}")
-            print(f" Link: {C.GRY}{MUSIC.get('url', '')}{C.R}")
-        else:
-            print(f" Trạng thái: {C.GRY}đang dừng{C.R}")
-        mpv_ok = "✓" if shutil.which("mpv") else "✗"
-        ytdlp_ok = "✓" if _ytdlp_cmd() else "✗"
-        print(f" {C.GRY}Trình phát mpv {mpv_ok} · yt-dlp {ytdlp_ok}{C.R}\n")
-        print(f"{C.LPUR}[1]{C.R} {C.WHT}Phát link YouTube{C.R}")
-        print(f"{C.LPUR}[2]{C.R} {C.WHT}Dừng nhạc{C.R}")
-        print(f"{C.LPUR}[3]{C.R} {C.WHT}Hướng dẫn{C.R}")
-        print(f"{C.LPUR}[4]{C.R} {C.WHT}Hẹn giờ nghe nhạc{C.R}")
-        print(f"{C.LPUR}[5]{C.R} {C.WHT}Kiểm tra / cập nhật yt-dlp{C.R}")
-        print(f"{C.LPUR}[6]{C.R} {C.WHT}Lịch sử nghe nhạc{C.R}")
-        print(f"{C.LPUR}[7]{C.R} {C.WHT}Nhạc yêu thích{C.R}")
-        print(f"{C.RED}[0] Quay lại{C.R}\n")
-        sub = ask("Chọn:").strip()
-        if sub == "0":
-            announce_choice("0", "Quay lại")
-            return
-        elif sub == "3":
-            announce_choice("3", "Hướng dẫn")
-            music_guide()
-        elif sub == "4":
-            announce_choice("4", "Hẹn giờ nghe nhạc")
-            menu_music_timer()
-        elif sub == "5":
-            announce_choice("5", "Kiểm tra / cập nhật yt-dlp")
-            menu_ytdlp_check()
-        elif sub == "6":
-            announce_choice("6", "Lịch sử nghe nhạc")
-            menu_music_history()
-        elif sub == "7":
-            announce_choice("7", "Nhạc yêu thích")
-            menu_music_favorites()
-        elif sub == "1":
-            announce_choice("1", "Phát link YouTube")
-            url = ask("Dán link YouTube:").strip()
-            if not url:
-                msg_cancel("Chưa nhập link.")
-                time.sleep(1)
-                continue
-            msg_info("Đang mở nhạc...")
-            ok, info = music_play(url)
-            (msg_done if ok else msg_err)(info[0].upper() + info[1:] if ok else f"Không phát được: {info}")
-            if not ok and _ytdlp_cmd():
-                cur, latest, outdated = ytdlp_status()
-                if outdated:
-                    print(f" {C.YEL}yt-dlp đang là {cur}, bản mới là {latest}. Lỗi thường do bản cũ.{C.R}")
-                    if ask("Cập nhật yt-dlp ngay? (y/n):").strip().lower() in ("y", "yes"):
-                        msg_info("Đang cập nhật yt-dlp...")
-                        ok2, info2 = ytdlp_update()
-                        (msg_done if ok2 else msg_err)(f"yt-dlp: {info2}" if ok2 else f"Cập nhật thất bại: {info2}")
-                        wait_enter()
-                        continue
-            time.sleep(1.5)
-        elif sub == "2":
-            announce_choice("2", "Dừng nhạc")
-            music_stop()
-            msg_done("Đã dừng nhạc.")
-            time.sleep(1)
-        else:
-            invalid_choice(sub)
 
 # ==================== THỐNG KÊ THEO NGÀY ====================
 DAILY_STATS_FILE = os.path.join(os.path.expanduser("~"), ".pain_daily_stats.json")
@@ -7286,117 +6794,31 @@ def _daily_recent(days=7):
 
 def menu_daily_stats():
     clear_screen()
-    section_title("THỐNG KÊ 7 NGÀY: ANTI-AFK, ĐỔI SERVER, HẸN GIỜ NHẠC")
+    section_title("THỐNG KÊ 7 NGÀY: ANTI-AFK, ĐỔI SERVER")
     rows = _daily_recent(7)
     if not rows:
         print(f" {C.GRY}Chưa có dữ liệu.{C.R}")
     for day, r in rows:
         afk_ok, afk_fail = r.get("afk_ok", 0), r.get("afk_fail", 0)
         hop_ok, hop_fail = r.get("hop_ok", 0), r.get("hop_fail", 0)
-        music = r.get("music_timer", 0)
         print(f" {C.WHT}{day}{C.R}")
         print(f"   Anti-AFK: {afk_ok} gửi được · {afk_fail} lỗi")
         print(f"   Đổi server: {hop_ok} thành công · {hop_fail} lỗi")
-        print(f"   Hẹn giờ nhạc: {music} lần")
         print()
     wait_enter()
 
-# ==================== HẸN GIỜ NGHE NHẠC ====================
-MUSIC_TIMER = {"enabled": False, "url": "", "start": "", "minutes": 30, "last_run": ""}
-_MUSIC_TIMER_STATE = {"stop_at": 0.0}
-
-def music_timer_tick():
-    """Gọi thường xuyên (vòng giám sát và khi đang chờ lệnh ở menu)."""
-    if not MUSIC_TIMER.get("enabled"):
-        return
-    now = datetime.now()
-    today = now.strftime("%Y-%m-%d")
-    url, start = MUSIC_TIMER.get("url", ""), MUSIC_TIMER.get("start", "")
-    if (url and _valid_hhmm(start) and MUSIC_TIMER.get("last_run") != today
-            and now.strftime("%H:%M") >= start and not _music_playing()):
-        MUSIC_TIMER["last_run"] = today
-        save_config_file()
-        ok, info = music_play(url)
-        _daily_bump("music_timer")
-        log_event("MUSIC", detail=f"Hẹn giờ {start}: {'phát' if ok else 'lỗi'} ({info})")
-        if ok:
-            _MUSIC_TIMER_STATE["stop_at"] = time.time() + int(MUSIC_TIMER.get("minutes", 30)) * 60
-    if _music_playing() and _MUSIC_TIMER_STATE.get("stop_at") and time.time() >= _MUSIC_TIMER_STATE["stop_at"]:
-        music_stop()
-        _MUSIC_TIMER_STATE["stop_at"] = 0.0
-        log_event("MUSIC", detail="Hẹn giờ: hết thời gian, đã dừng nhạc")
-
-def menu_music_timer():
-    while True:
-        clear_screen()
-        section_title("HẸN GIỜ NGHE NHẠC")
-        on = MUSIC_TIMER.get("enabled")
-        print(f" Trạng thái: {C.GRN + 'BẬT' if on else C.RED + 'TẮT'}{C.R}")
-        print(f" Link: {C.GRY}{MUSIC_TIMER.get('url') or 'chưa đặt'}{C.R}")
-        print(f" Giờ bắt đầu: {C.WHT}{MUSIC_TIMER.get('start') or 'chưa đặt'}{C.R} · Thời lượng: {MUSIC_TIMER.get('minutes', 30)} phút")
-        print(f" Lần chạy gần nhất: {MUSIC_TIMER.get('last_run') or 'chưa có'}")
-        print(f" {C.GRY}Chạy mỗi ngày một lần. Tool phải đang mở (hoặc đang ở menu) lúc đến giờ.{C.R}\n")
-        print(f"{C.LPUR}[1]{C.R} {C.WHT}Đặt hẹn giờ{C.R}")
-        print(f"{C.LPUR}[2]{C.R} {C.WHT}Tắt hẹn giờ{C.R}")
-        print(f"{C.RED}[0] Quay lại{C.R}\n")
-        sub = ask("Chọn:").strip()
-        if sub == "0":
-            announce_choice("0", "Quay lại")
-            return
-        elif sub == "1":
-            announce_choice("1", "Đặt hẹn giờ")
-            url = ask("Link YouTube (Enter để giữ link cũ):").strip() or MUSIC_TIMER.get("url", "")
-            if not _is_youtube_url(url):
-                msg_err("Link không phải YouTube.")
-                time.sleep(1.5)
-                continue
-            start = ask("Giờ bắt đầu (HH:MM):").strip()
-            if not _valid_hhmm(start):
-                msg_err("Giờ không hợp lệ, dùng dạng HH:MM.")
-                time.sleep(1.5)
-                continue
-            mins = ask("Thời lượng (phút, 1-600):").strip()
-            if not mins.isdigit() or not 1 <= int(mins) <= 600:
-                msg_err("Thời lượng phải từ 1 đến 600 phút.")
-                time.sleep(1.5)
-                continue
-            now_hm = datetime.now().strftime("%H:%M")
-            MUSIC_TIMER.update(enabled=True, url=url, start=start, minutes=int(mins))
-            # Nếu giờ đã qua trong ngày, không phát ngay mà chờ đến ngày mai
-            MUSIC_TIMER["last_run"] = datetime.now().strftime("%Y-%m-%d") if start <= now_hm else ""
-            save_config_file()
-            if start <= now_hm:
-                msg_done(f"Đã đặt. Giờ {start} đã qua hôm nay, sẽ chạy vào ngày mai.")
-            else:
-                msg_done(f"Đã đặt hẹn giờ {start}, phát {mins} phút.")
-            wait_enter()
-        elif sub == "2":
-            announce_choice("2", "Tắt hẹn giờ")
-            MUSIC_TIMER["enabled"] = False
-            save_config_file()
-            msg_done("Đã tắt hẹn giờ nghe nhạc.")
-            time.sleep(1)
-        else:
-            invalid_choice(sub)
-
 def emergency_stop():
-    """Mục 19: dừng ngay mọi tab game đang chạy và nhạc YouTube. Không xóa cấu hình, script hay key."""
+    """Dừng ngay mọi tab game đang chạy. Không xóa cấu hình, script hay key."""
     clear_screen()
     section_title("DỪNG KHẨN CẤP")
     pkgs = get_running_packages() or []
-    music_on = _music_playing()
-    timer_on = MUSIC_TIMER.get("enabled")
-    if not pkgs and not music_on:
-        msg_done("Không có tab game hay nhạc nào đang chạy.")
-        if timer_on:
-            print(f" {C.GRY}Hẹn giờ nhạc vẫn bật, sẽ chạy lại đúng giờ đã đặt.{C.R}")
+    if not pkgs:
+        msg_done("Không có tab game nào đang chạy.")
         wait_enter()
         return
     print(f" {C.WHT}Sẽ dừng:{C.R}")
     for pkg in pkgs:
         print(f"   - Tab game: {tab_label(pkg)}")
-    if music_on:
-        print("   - Nhạc YouTube")
     print()
     if ask("Dừng tất cả ngay? (y/n):").strip().lower() not in ("y", "yes"):
         msg_cancel("Đã hủy, không dừng gì.")
@@ -7409,14 +6831,8 @@ def emergency_stop():
             stopped.append(tab_label(pkg))
         except Exception:
             pass
-    if music_on:
-        music_stop()
-        stopped.append("nhạc YouTube")
-    _MUSIC_TIMER_STATE["stop_at"] = 0.0
     log_event("STOP", detail="Dừng khẩn cấp: " + (", ".join(stopped) or "không có"))
     msg_done("Đã dừng: " + (", ".join(stopped) or "không có gì"))
-    if timer_on:
-        print(f" {C.GRY}Hẹn giờ nhạc vẫn bật, sẽ chạy lại đúng giờ đã đặt.{C.R}")
     wait_enter()
 
 def setup_low_ram():
@@ -7976,7 +7392,7 @@ def read_log_entries():
 LOG_LEVELS = {
     "1": ("Lỗi", LOG_ERROR_KINDS),
     "2": ("Cảnh báo", ("WARN", "HOP_FAIL")),
-    "3": ("Thành công", ("REJOIN_OK", "HOP", "NET_UP", "MUSIC")),
+    "3": ("Thành công", ("REJOIN_OK", "HOP", "NET_UP")),
     "4": ("Thông tin", ("START", "STOP", "ANTI_AFK")),
 }
 
@@ -8785,15 +8201,20 @@ def _lib_add_script():
     print(f"{C.RED}[0] Quay lại{C.R}\n")
     how = ask("Chọn:").strip()
     if how == "0":
+        announce_choice("0", "Quay lại")
         return
     text, suggested = None, None
     if how == "1":
+        announce_choice("1", "Dán trực tiếp")
         text = _read_multiline()
     elif how == "2":
+        announce_choice("2", "Đọc từ file .lua")
         text, suggested = _source_from_file()
     elif how == "3":
+        announce_choice("3", "Từ clipboard")
         text, suggested = _source_from_clipboard()
     elif how == "4":
+        announce_choice("4", "Từ URL")
         text, suggested = _source_from_url()
     else:
         invalid_choice(how)
@@ -9096,6 +8517,7 @@ def _lib_check_syntax():
     if raw in ("", "0"):
         return
     if raw == "a":
+        announce_choice("a", "Tất cả")
         targets = list(range(len(data["scripts"])))
     elif raw.isdigit() and 1 <= int(raw) <= len(data["scripts"]):
         targets = [int(raw) - 1]
@@ -9227,6 +8649,7 @@ def _pick_executor_targets(kind):
     print()
     raw = ask("Chọn executor (số cách nhau dấu cách, Enter = tất cả, 0 = hủy):").strip()
     if raw == "0":
+        announce_choice("0", "Hủy")
         return []
     selectable = [i for i, (_l, t) in enumerate(rows) if t]
     if raw == "":
@@ -9273,15 +8696,20 @@ def _lib_add_to_executor_scripts():
     print(f"{C.RED}[0] Quay lại{C.R}\n")
     how = ask("Chọn:").strip()
     if how == "0":
+        announce_choice("0", "Quay lại")
         return
     text, suggested = None, None
     if how == "1":
+        announce_choice("1", "Dán trực tiếp")
         text = _read_multiline()
     elif how == "2":
+        announce_choice("2", "Đọc từ file .lua")
         text, suggested = _source_from_file()
     elif how == "3":
+        announce_choice("3", "Từ clipboard")
         text, suggested = _source_from_clipboard()
     elif how == "4":
+        announce_choice("4", "Từ URL")
         text, suggested = _source_from_url()
     else:
         invalid_choice(how)
@@ -9561,9 +8989,8 @@ MENU_NAMES = {
     "12": "Xem log",
     "13": "Gán executor",
     "14": "Anti-AFK",
-    "15": "Nghe nhạc",
-    "16": "Dừng khẩn cấp",
-    "17": "Cài đặt",
+    "15": "Dừng khẩn cấp",
+    "16": "Cài đặt",
     "0": "Thoát",
 }
 
@@ -10202,6 +9629,7 @@ def menu_key_injector():
             raw = input("Chọn: ").strip().lower()
             chosen = []
             if raw == "p":
+                announce_choice("p", "Nhập đường dẫn tay")
                 path = input("Đường dẫn file (bắt đầu bằng /): ").strip()
                 if path.startswith("/") and get_file_size(path) > 0:
                     chosen = [path]
@@ -10908,7 +10336,7 @@ def menu_package_prefix():
 
 def menu_package_mode():
     """Package mode: chứa Package Prefix Mode và Custom Package List"""
-    global PACKAGE_MODE
+    global PACKAGE_MODE, SELECT_ALL_PACKAGES
     while True:
         clear_screen()
         section_title("PACKAGE MODE")
@@ -10929,6 +10357,8 @@ def menu_package_mode():
         elif sub == "2":
             announce_choice("2", "Custom Package List")
             PACKAGE_MODE = "custom"
+            SELECTED_PACKAGES.clear()
+            SELECT_ALL_PACKAGES = True
             save_config_file()
             menu_custom_packages()
         else:
@@ -11388,7 +10818,6 @@ HELP_PAGES = [
     ]),
     ("Chuẩn bị", [
         "Cài Python: pkg install python",
-        "Muốn nghe nhạc: pkg install mpv và pip install -U yt-dlp",
         "Muốn copy tên package hoặc đọc clipboard: cài app Termux:API.",
         "Các phần này không bắt buộc, tool vẫn chạy được không cần chúng.",
     ]),
@@ -11403,9 +10832,8 @@ HELP_PAGES = [
         "Gõ s khi đang giám sát để xem bảng trạng thái.",
     ]),
     ("Các mục hay dùng", [
-        "17  Anti-AFK: gửi thao tác nhẹ định kỳ (cần root).",
-        "18  Nhạc YouTube: phát nhạc nền, có hẹn giờ, lịch sử và yêu thích.",
-        "19  Dừng khẩn cấp: dừng ngay các tab và nhạc đang chạy.",
+        "14  Anti-AFK: gửi thao tác nhẹ định kỳ (cần root).",
+        "15  Dừng khẩn cấp: dừng ngay các tab đang chạy.",
         "12  Xem log: lọc theo mức độ, tra mã lỗi, xuất log theo ngày.",
     ]),
 ]
@@ -11448,9 +10876,6 @@ def weekly_backup_if_due():
     try:
         with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
             z.writestr("config.json", json.dumps(_redacted_config(), ensure_ascii=False, indent=2))
-            for extra in (MUSIC_STORE, MUSIC_STORE + ".tmp"):
-                if os.path.exists(extra):
-                    z.write(extra, os.path.basename(extra))
             if os.path.isdir(SCRIPT_LIB_DIR):
                 for name in os.listdir(SCRIPT_LIB_DIR):
                     fp = os.path.join(SCRIPT_LIB_DIR, name)
@@ -11620,7 +11045,7 @@ def verify_and_start():
     while True:
         license_guard_tick()
         show_banner()
-        choice = ask_main("Chọn chức năng [0-17]:").strip()
+        choice = ask_main("Chọn chức năng [0-16]:").strip()
         if choice.lower() == "help":
             show_help()
             continue
@@ -11661,10 +11086,8 @@ def verify_and_start():
         elif choice == "14":
             menu_anti_afk()
         elif choice == "15":
-            menu_music()
-        elif choice == "16":
             emergency_stop()
-        elif choice == "17":
+        elif choice == "16":
             menu_settings()
 
 

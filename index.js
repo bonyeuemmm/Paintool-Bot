@@ -17,15 +17,10 @@ const fs = require('fs');
 const zlib = require('zlib');
 const path = require('path');
 
-// BOT_ROLE: 'main' = bot chính (API, lệnh thành viên, tác vụ nền). 'admin' = bot admin (lệnh quản trị).
-// Mỗi service trên bot-hosting chạy một vai trò, cùng một file này.
-const BOT_ROLE = (process.env.BOT_ROLE || 'both').trim().toLowerCase();
-if (!['main', 'admin', 'both'].includes(BOT_ROLE)) {
-    console.error(`[FATAL] BOT_ROLE phải là 'both', 'main' hoặc 'admin' (hiện là '${BOT_ROLE}').`);
-    process.exit(1);
-}
-const IS_MAIN = BOT_ROLE !== 'admin';   // bot chính (DISCORD_TOKEN)
-const IS_ADMIN = BOT_ROLE !== 'main';   // bot admin (ADMIN_BOT_TOKEN), chạy cùng tiến trình khi 'both'
+// Một file, hai bot online cùng lúc, mỗi bot một token:
+// - Bot chính: DISCORD_TOKEN (luôn chạy).
+// - Bot admin: ADMIN_BOT_TOKEN (chạy nếu có token; không có thì chỉ chạy bot chính).
+const IS_MAIN = true;
 
 const TOKEN = process.env.DISCORD_TOKEN;
 if (IS_MAIN && (!TOKEN || typeof TOKEN !== 'string' || TOKEN.trim() === '')) {
@@ -373,12 +368,10 @@ const client = new Client({
     ] 
 });
 
-// ============ BOT ADMIN (token riêng). Thiếu ADMIN_BOT_TOKEN thì chỉ chạy bot chính. ============
-const ADMIN_BOT_TOKEN = IS_ADMIN ? ((process.env.ADMIN_BOT_TOKEN || '').trim() || null) : null;
-if (BOT_ROLE === 'admin' && !ADMIN_BOT_TOKEN) {
-    console.error('[FATAL] BOT_ROLE=admin nhưng thiếu ADMIN_BOT_TOKEN.');
-    process.exit(1);
-}
+// ============ BOT ADMIN (token riêng) ============
+const ADMIN_BOT_TOKEN = (process.env.ADMIN_BOT_TOKEN || '').trim() || null;
+const IS_ADMIN = !!ADMIN_BOT_TOKEN;
+if (!IS_ADMIN) console.warn('⚠️ [ADMIN BOT] Chưa có ADMIN_BOT_TOKEN: bot admin không chạy, chỉ có bot chính.');
 const ADMIN_CLIENT_ID_ENV = process.env.ADMIN_CLIENT_ID || null;
 const adminClient = ADMIN_BOT_TOKEN ? new Client({
     intents: [
@@ -624,7 +617,13 @@ async function handleInteraction(interaction) {
     const { commandName } = interaction;
 
     // PHẢN HỒI NGAY LẬP TỨC CHO DISCORD TRÁNH LỖI OVER 3S
-    const isPublicCommand = ['redeem', 'createkey', 'gettoken'].includes(commandName);
+    // Lệnh thành viên (/redeem, /getkey, /resethwid): trả lời ẩn, chỉ người dùng lệnh thấy.
+    // Lệnh admin (bot admin ở server admin): công khai cho mọi người trong server, trừ các lệnh nhạy cảm bên dưới.
+    // Chỉ đổi thành công khai khi người gọi là admin; người không có quyền vẫn nhận thông báo ẩn.
+    const ADMIN_PRIVATE_COMMANDS = ['setadmin', 'backuprestore', 'removekey'];
+    const ADMIN_ONLY_COMMANDS = ['keylist','keyinfo','blacklist','backupcheck','backuprestore','adminlist','adminstats','searchkey','setresetcooldown','createkey','gettoken','setadmin','removekey'];
+    const isAdminCall = ADMIN_ONLY_COMMANDS.includes(commandName) && (await isSystemAdmin(userId));
+    const isPublicCommand = (isAdminCall && !ADMIN_PRIVATE_COMMANDS.includes(commandName));
     try {
         await interaction.deferReply({ ephemeral: !isPublicCommand });
     } catch (e) {
