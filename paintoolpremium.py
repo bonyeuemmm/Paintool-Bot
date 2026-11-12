@@ -3492,14 +3492,29 @@ def is_app_in_foreground(pkg):
         return True
     return pkg in dump
 
+def _pkg_uid(pkg):
+    """UID Linux của đúng package này (mỗi clone có UID riêng)."""
+    out = sh(f"stat -c %u /data/data/{shlex.quote(pkg)} 2>/dev/null", timeout=5) or ""
+    out = out.strip()
+    if out.isdigit():
+        return out
+    out = sh(f"dumpsys package {shlex.quote(pkg)} 2>/dev/null | grep -m1 -o 'userId=[0-9]*'", timeout=8) or ""
+    m = re.search(r"(\d+)", out)
+    return m.group(1) if m else None
+
 def close_game(pkg):
-    sh(f"am force-stop {pkg}")
-    sh(f"am kill {pkg}")
+    """Tắt đúng tab của package này. Chỉ kill tiến trình có UID của package này, không đụng tab/clone khác."""
+    sh(f"am force-stop {shlex.quote(pkg)}")
+    sh(f"am kill {shlex.quote(pkg)}")
     time.sleep(0.5)
+    uid = _pkg_uid(pkg)
     for _ in range(3):
         if not is_app_running(pkg):
             break
-        sh(f"kill -9 $(pidof {pkg})", timeout=5)
+        if uid:
+            sh(f"for p in $(pidof {shlex.quote(pkg)}); do "
+               f"[ \"$(awk '/^Uid:/{{print $2}}' /proc/$p/status 2>/dev/null)\" = \"{uid}\" ] && kill -9 $p; done",
+               timeout=5)
         time.sleep(0.5)
 
 def game_link_for(pkg=None):
