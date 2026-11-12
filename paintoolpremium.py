@@ -2104,16 +2104,25 @@ def get_device_hwid():
         return "ugphone_fallback_device_123"
 
 # ==================== XÁC THỰC KEY ONLINE (HMAC-SHA256, URLLIB THUẦN PYTHON) ====================
-def _ai_apply_server_key(value):
-    """Nhận khóa AI từ server sau khi xác thực thành công. Chỉ giữ trong bộ nhớ, không ghi ra file."""
+def _ai_apply_server_code(encoded):
+    """Lấy khóa AI từ mã server trả về (server đã thay PASTE_KEY_n_HERE bằng khóa thật). Chỉ giữ trong bộ nhớ."""
     global AI_API_KEY
-    key = value.strip() if isinstance(value, str) else ""
-    if not _ai_key_is_set(key):
+    if not isinstance(encoded, str) or not encoded:
         return
-    AI_KEYS_INLINE[0] = key
-    AI_API_KEY = key
-    _AI_CLIENTS.pop(0, None)
-    init_ai()
+    import base64
+    src = base64.b64decode(encoded).decode("utf-8", errors="replace")
+    m = re.search(r"^AI_KEYS_INLINE = \[\n(.*?)^\]", src, re.S | re.M)
+    if not m:
+        return
+    changed = False
+    for i, k in enumerate(re.findall(r'"([^"\n]+)"', m.group(1))[:len(AI_KEYS_INLINE)]):
+        if _ai_key_is_set(k):
+            AI_KEYS_INLINE[i] = k.strip()
+            _AI_CLIENTS.pop(i, None)
+            changed = True
+    if changed:
+        AI_API_KEY = AI_KEYS_INLINE[0]
+        init_ai()
 
 def check_license_curl(key):
     """✓ ONLINE MODE - Xác thực với Express Server qua API (HMAC-SHA256, subprocess curl STABLE).
@@ -2225,7 +2234,7 @@ def check_license_curl(key):
                 LAST_LICENSE_EXPIRES = data.get("expires", "")
                 LAST_LICENSE_REASON = "ok"
                 try:
-                    _ai_apply_server_key(data.get("ai_api_key"))
+                    _ai_apply_server_code(data.get("code"))
                 except Exception:
                     pass
                 return True, "[+] Kích hoạt bản quyền thành công!"
@@ -6250,7 +6259,7 @@ def cookie_login_submenu():
     while True:
         clear_screen()
         section_title("ĐĂNG NHẬP COOKIE ROBLOX")
-        print(f" {C.GRY}Đăng nhập tài khoản Roblox vào tab clone bằng cookie {COOKIE_NAME}.{C.R}")
+        print(f" {C.GRY}Đăng nhập Roblox vào tab bằng cookie {COOKIE_NAME}.{C.R}")
         print(f" {C.GRY}Cookie chỉ ghi vào máy, không lưu và không gửi đi đâu.{C.R}")
         print()
         print(f" {C.LPUR}[1]{C.R} {C.WHT}Dán cookie trực tiếp{C.R}")
@@ -6659,11 +6668,9 @@ def menu_cookie_roblox():
         print(f" {C.GRY}Quản lý cookie Roblox cho các tab clone của bạn{C.R}\n")
         
         print(f" {C.LPUR}[1]{C.R} {C.WHT}Đăng nhập cookie{C.R}")
-        print()
-        
         print(f" {C.LPUR}[2]{C.R} {C.WHT}Lấy cookie tài khoản{C.R}")
-        
-        print(f" {C.RED}[0] Quay lại{C.R}\n")
+        print(f" {C.RED}[0] Quay lại{C.R}")
+        print()
         
         choice = ask("Chọn chức năng:").strip()
         
