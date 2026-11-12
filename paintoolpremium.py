@@ -2713,79 +2713,82 @@ def antiban_tick():
     antiban_is_paused()
     antiban_evaluate()
 
+def _ai_onoff(flag):
+    return f"{C.GRN}BẬT{C.R}" if flag else f"{C.RED}TẮT{C.R}"
+
 def setup_screen_ai():
     clear_screen()
-    section_title("AI DOC MAN HINH")
-    print(f" Trang thai: {'BAT' if SCREEN_AI.get('enabled') else 'TAT'}")
-    print(f" Chu ky quet: {SCREEN_AI.get('interval_sec', 45)}s")
-    print(f" Nguong freeze: {SCREEN_AI.get('freeze_limit', 3)}")
+    section_title("AI ĐỌC MÀN HÌNH")
+    print(f" Trạng thái: {_ai_onoff(SCREEN_AI.get('enabled'))}")
+    print(f" Chu kỳ quét: {C.WHT}{SCREEN_AI.get('interval_sec', 45)}s{C.R}")
+    print(f" Ngưỡng freeze: {C.WHT}{SCREEN_AI.get('freeze_limit', 3)}{C.R}")
     print()
-    print(" [1] Bat/Tat")
-    print(" [2] Dat chu ky quet (20-180)")
-    print(" [3] Dat nguong freeze (2-8)")
-    print(" [0] Quay lại")
-    sub = ask("Chon:").strip()
+    print(f" {C.LPUR}[1]{C.R} {C.WHT}Bật / tắt{C.R}")
+    print(f" {C.LPUR}[2]{C.R} {C.WHT}Đặt chu kỳ quét (20-180){C.R}")
+    print(f" {C.LPUR}[3]{C.R} {C.WHT}Đặt ngưỡng freeze (2-8){C.R}")
+    print(f" {C.RED}[0] Quay lại{C.R}\n")
+    sub = ask("Chọn:").strip()
     if sub == "1":
         SCREEN_AI["enabled"] = not SCREEN_AI.get("enabled")
         save_config_file()
-        msg_done(f"AI Screen: {'BAT' if SCREEN_AI['enabled'] else 'TAT'}")
+        msg_done(f"AI đọc màn hình: {'BẬT' if SCREEN_AI['enabled'] else 'TẮT'}")
     elif sub == "2":
-        v = ask("Chu ky (giay):").strip()
+        v = ask("Chu kỳ (giây):").strip()
         if v.isdigit() and 20 <= int(v) <= 180:
             SCREEN_AI["interval_sec"] = int(v)
             save_config_file()
-            msg_done(f"Chu ky = {v}s")
+            msg_done(f"Chu kỳ = {v}s")
     elif sub == "3":
-        v = ask("Nguong freeze:").strip()
+        v = ask("Ngưỡng freeze:").strip()
         if v.isdigit() and 2 <= int(v) <= 8:
             SCREEN_AI["freeze_limit"] = int(v)
             save_config_file()
-            msg_done(f"Nguong = {v}")
+            msg_done(f"Ngưỡng = {v}")
     time.sleep(1)
 
 def setup_antiban():
     clear_screen()
-    section_title("AI ANTI-BAN")
+    section_title("AI TRÁNH BẪY BAN")
     risk, detail = antiban_calc_risk()
-    print(f" Trang thai: {'BAT' if ANTI_BAN.get('enabled') else 'TAT'}")
-    print(f" Risk: {risk}% | 262={detail['262']} fail={detail['fail']} cookie={detail['cookie']} wave={detail['wave']}")
-    print(f" Nguong pause: {ANTI_BAN.get('risk_threshold', 70)}%")
-    print(f" Thoi gian pause: {ANTI_BAN.get('pause_minutes', 45)} phut")
+    print(f" Trạng thái: {_ai_onoff(ANTI_BAN.get('enabled'))}")
+    print(f" Risk: {C.WHT}{risk}%{C.R} | 262={detail['262']} fail={detail['fail']} cookie={detail['cookie']} wave={detail['wave']}")
+    print(f" Ngưỡng tạm dừng: {C.WHT}{ANTI_BAN.get('risk_threshold', 70)}%{C.R}")
+    print(f" Thời gian tạm dừng: {C.WHT}{ANTI_BAN.get('pause_minutes', 45)} phút{C.R}")
     if ANTI_BAN.get("paused"):
         left = max(0, int(ANTI_BAN.get("pause_until", 0) - time.time()))
-        print(f" DANG TAM DUNG con {left // 60}p{left % 60}s")
+        print(f" {C.YEL}ĐANG TẠM DỪNG còn {left // 60}p{left % 60}s{C.R}")
     print()
-    print(" [1] Bat/Tat")
-    print(" [2] Dat nguong risk (40-95)")
-    print(" [3] Dat thoi gian pause (15-180)")
-    print(" [4] Reset bo dem")
-    print(" [0] Quay lại")
-    sub = ask("Chon:").strip()
+    print(f" {C.LPUR}[1]{C.R} {C.WHT}Bật / tắt{C.R}")
+    print(f" {C.LPUR}[2]{C.R} {C.WHT}Đặt ngưỡng risk (40-95){C.R}")
+    print(f" {C.LPUR}[3]{C.R} {C.WHT}Đặt thời gian tạm dừng (15-180){C.R}")
+    print(f" {C.LPUR}[4]{C.R} {C.WHT}Reset bộ đếm{C.R}")
+    print(f" {C.RED}[0] Quay lại{C.R}\n")
+    sub = ask("Chọn:").strip()
     if sub == "1":
         ANTI_BAN["enabled"] = not ANTI_BAN.get("enabled")
         if not ANTI_BAN["enabled"]:
             ANTI_BAN["paused"] = False
         save_config_file()
-        msg_done(f"Anti-Ban: {'BAT' if ANTI_BAN['enabled'] else 'TAT'}")
+        msg_done(f"AI tránh bẫy ban: {'BẬT' if ANTI_BAN['enabled'] else 'TẮT'}")
     elif sub == "2":
-        v = ask("Nguong risk:").strip()
+        v = ask("Ngưỡng risk:").strip()
         if v.isdigit() and 40 <= int(v) <= 95:
             ANTI_BAN["risk_threshold"] = int(v)
             save_config_file()
-            msg_done(f"Nguong = {v}%")
+            msg_done(f"Ngưỡng = {v}%")
     elif sub == "3":
-        v = ask("Phut pause:").strip()
+        v = ask("Phút tạm dừng:").strip()
         if v.isdigit() and 15 <= int(v) <= 180:
             ANTI_BAN["pause_minutes"] = int(v)
             save_config_file()
-            msg_done(f"Pause = {v} phut")
+            msg_done(f"Tạm dừng = {v} phút")
     elif sub == "4":
         for k in ("error_262", "rejoin_fail", "cookie_change", "wave_hits"):
             ANTI_BAN[k] = []
         ANTI_BAN["paused"] = False
         ANTI_BAN["last_risk"] = 0
         save_config_file()
-        msg_done("Da reset")
+        msg_done("Đã reset")
     time.sleep(1)
 
 def _ai_usage_today():
@@ -3368,7 +3371,7 @@ def run_source_packages():
 def get_all_packages():
     if PACKAGE_MODE == "custom":
         return run_source_packages()
-    output = run_cmd(["pm", "list", "packages"])
+    output = _pm_list_packages()
     packages = []
     for line in output.splitlines():
         if PACKAGE_PREFIX in line:
@@ -3384,9 +3387,19 @@ def _short_pkg(pkg):
         return pkg[len(PACKAGE_PREFIX):].lstrip(".") or pkg
     return pkg
 
+_PM_CACHE = {"t": 0.0, "out": ""}
+
+def _pm_list_packages(ttl=5.0):
+    """pm list packages khá chậm trên Android: gom các lần gọi trong vài giây thành một lần."""
+    now = time.time()
+    if now - _PM_CACHE["t"] > ttl:
+        _PM_CACHE["out"] = run_cmd(["pm", "list", "packages"])
+        _PM_CACHE["t"] = now
+    return _PM_CACHE["out"]
+
 def scan_prefix_packages():
     """Quét máy theo PACKAGE_PREFIX (chỉ dùng cho Prefix Mode)."""
-    out = run_cmd(["pm", "list", "packages"])
+    out = _pm_list_packages()
     pkgs = []
     for line in out.splitlines():
         if PACKAGE_PREFIX in line and ":" in line:
@@ -3394,7 +3407,7 @@ def scan_prefix_packages():
     return sorted(set(pkgs))
 
 def installed_package_set():
-    out = run_cmd(["pm", "list", "packages"])
+    out = _pm_list_packages()
     return {ln.split(":", 1)[1].strip() for ln in out.splitlines() if ":" in ln}
 
 def list_installed_packages():
@@ -4515,8 +4528,8 @@ EXECUTOR_PACKAGE_MAP = {}
 def preflight_package_rows():
     """Danh sách package sẽ chạy theo model đang chọn (prefix hoặc custom list).
     Mỗi dòng: pkg, đã cài game trên máy hay chưa, username Roblox (rỗng nếu chưa đăng nhập)."""
-    names = list(CUSTOM_PACKAGES) if PACKAGE_MODE == "custom" else list_installed_packages()
-    on_device = {ln.split(":", 1)[1].strip() for ln in run_cmd(["pm", "list", "packages"]).splitlines() if ":" in ln}
+    names = get_running_packages()   # chỉ package đã tick và thật sự sẽ chạy
+    on_device = installed_package_set()
     rows = []
     for p in sorted(set(names)):
         info = PACKAGE_GAMES.get(p) or {}
@@ -10609,10 +10622,10 @@ def menu_ai_setup():
         print(f" AI Screen: {C.GRN + 'BẬT' if SCREEN_AI.get('enabled') else C.RED + 'TẮT'}{C.R}")
         print(f" AI Anti-Ban: {C.GRN + 'BẬT' if ANTI_BAN.get('enabled') else C.RED + 'TẮT'}{C.R} (risk={ANTI_BAN.get('last_risk', 0)}%)")
         print()
-        print(f"{C.LPUR}[1]{C.R} {C.WHT}Bật / tắt phân tích lỗi{C.R}")
-        print(f"{C.LPUR}[2]{C.R} {C.WHT}AI đọc màn hình{C.R}")
-        print(f"{C.LPUR}[3]{C.R} {C.WHT}AI tránh bẫy ban{C.R}")
-        print(f"{C.RED}[0] Quay lại{C.R}\n")
+        print(f" {C.LPUR}[1]{C.R} {C.WHT}Bật / tắt phân tích lỗi{C.R}")
+        print(f" {C.LPUR}[2]{C.R} {C.WHT}AI đọc màn hình{C.R}")
+        print(f" {C.LPUR}[3]{C.R} {C.WHT}AI tránh bẫy ban{C.R}")
+        print(f" {C.RED}[0] Quay lại{C.R}\n")
         sub = ask("Chọn:").strip()
         if sub == "0":
             return
