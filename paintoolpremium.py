@@ -1568,6 +1568,7 @@ class C:
     PUR = "\033[1;35m"
     LPUR = "\033[38;5;141m"
     GRN = "\033[1;32m"
+    DGRN = "\033[1;38;5;28m"  # xanh lá đậm (dùng cho chữ Start)
     RED = "\033[1;31m"
     YEL = "\033[1;33m"
     CYN = "\033[1;36m"
@@ -1708,8 +1709,9 @@ def _confirm_exit():
     except Exception:
         return True
 
-def exit_tool():
-    if not _confirm_exit():
+def exit_tool(confirm=True):
+    # confirm=True (menu chính): hỏi xác nhận nếu còn tab đang chạy. confirm=False (màn hình nhập key): thoát ngay.
+    if confirm and not _confirm_exit():
         return
     try:
         print(f"\n {C.GRN}[✓] Đã thoát tool thành công. Good bye!{C.R}")
@@ -2376,7 +2378,7 @@ def authenticate():
         input_key = ask("Nhập Key:").strip()
 
         if input_key.lower() in ("exit", "0"):
-            exit_tool()
+            exit_tool(confirm=False)
 
         if not input_key:
             continue
@@ -4499,6 +4501,15 @@ def get_active_packages():
     picked = [p for p in base if p not in UNTICKED_PACKAGES]
     return picked if picked else base
 
+def in_multitask(pkg):
+    """Tab còn trong danh sách Đa nhiệm (có task của package). Tiến trình nền đã gỡ khỏi Đa nhiệm không tính."""
+    out = sh(f"dumpsys activity activities 2>/dev/null | grep -E 'Task\\{{.*A=[0-9]+:{pkg}( |\\}})' | head -1", timeout=8)
+    return bool((out or "").strip())
+
+def get_tabs_in_multitask():
+    """Các tab đang chạy VÀ còn trong Đa nhiệm (dùng cho dòng trạng thái ở menu chính)."""
+    return [p for p in get_running_packages() if in_multitask(p)]
+
 def get_running_packages():
     """Package thực sự được chạy: có trong prefix và trong danh sách đã chọn"""
     active = get_active_packages()
@@ -5827,7 +5838,7 @@ def show_banner():
     if update_available():
         update_info = globals().get('UPDATE_INFO', {})
         print(box_kv("Cập nhật", f"{dot(None)} {C.YEL}{clip(f'Có bản mới {update_info.get('latest', 'N/A')} — hãy cập nhật để dùng tool tốt nhất', vw - 2)}{C.R}", w, lw))
-    _running = _ttl("running", 15, get_running_packages) or []
+    _running = _ttl("running_mt", 15, get_tabs_in_multitask) or []
     _err_recent = time.time() - _LAST_ERROR["t"] < 600
     _dot = f"{C.GRN}●{C.R} {len(_running)} tab chạy" if _running else f"{C.GRY}○ nghỉ{C.R}"
     _warn = f" · {C.RED}! lỗi gần đây{C.R}" if _err_recent else ""
@@ -5857,7 +5868,8 @@ def show_banner():
     for k, label in entries:
         if k == "0":
             continue
-        print(f" {C.LPUR}[{k}]{C.R} {C.WHT}{clip(label, w - 8)}{C.R}")
+        name_color = C.DGRN if k == "1" else C.WHT
+        print(f" {C.LPUR}[{k}]{C.R} {name_color}{clip(label, w - 8)}{C.R}")
     print(f" {C.RED}[0] {dict(entries)['0']}{C.R}")
     print(box_bot(w))
 
@@ -7963,9 +7975,9 @@ def _find_autoexec_child(base):
         names = os.listdir(base)
     except OSError:
         names = sh(f"ls -1 {shlex.quote(base)} 2>/dev/null", timeout=5).split() if root_mode() else []
-    for n in names:
+    for n in sorted(names, key=lambda x: (x.lower() != "autoexec", x)):
         p = os.path.join(base, n)
-        if n.lower() == "autoexec" and _path_exists(p):
+        if _is_autoexec_name(n) and _path_exists(p):
             return p
     return None
 
@@ -8209,6 +8221,11 @@ def print_script_preview(text):
 
 def _lib_add_script():
     print(f"\n{C.WHT}Thêm script mới{C.R}\n")
+    # Quét và chọn executor trước (giống mục scripts), rồi mới nhập nội dung script
+    targets = _pick_executor_targets("autoexec")
+    if not targets:
+        return
+    print()
     print(f"{C.LPUR}[1]{C.R} {C.WHT}Dán trực tiếp{C.R}")
     print(f"{C.LPUR}[2]{C.R} {C.WHT}Đọc từ file .lua{C.R}")
     print(f"{C.LPUR}[3]{C.R} {C.WHT}Từ clipboard{C.R}")
@@ -8252,7 +8269,6 @@ def _lib_add_script():
     data["scripts"].append(entry)
     _lib_save(data)
     msg_done(f"Đã lưu '{name}' vào thư viện ({len(text)} ký tự).")
-    targets = _pick_executor_targets("autoexec")
     if targets:
         ok = _write_file_to_targets(_lib_script_path(entry), entry["file"], targets)
         msg_done(f"Đã ghi vào {ok}/{len(targets)} thư mục autoexec.") if ok == len(targets) else msg_warn(f"Ghi được {ok}/{len(targets)} thư mục autoexec.")
@@ -8560,15 +8576,24 @@ def _lib_stats():
         print(f"\n {C.GRY}Chưa sync lần nào.{C.R}")
     wait_enter()
 
+def _is_autoexec_name(n):
+    """Nhận mọi cách viết của thư mục autoexec: autoexec, AutoExec, AUTOEXEC, auto_exec, auto-exec,
+    autoexecute, AutoExecute, autoexe, autoex, autoexecs..."""
+    norm = re.sub(r"[\s_\-.]", "", str(n).lower())
+    return bool(re.fullmatch(r"auto(ex|exe|exec|execs|execute|executes|execution)", norm))
+
 def _find_child_named(base, target):
-    """Tìm thư mục con có tên khớp target (không phân biệt hoa/thường) trong base. Chỉ tìm, không tạo."""
+    """Tìm thư mục con có tên khớp target trong base. Chỉ tìm, không tạo.
+    Với 'autoexec' nhận mọi cách viết (xem _is_autoexec_name); ưu tiên đúng tên 'autoexec' nếu có nhiều."""
     try:
         names = os.listdir(base)
     except OSError:
         names = sh(f"ls -1 {shlex.quote(base)} 2>/dev/null", timeout=5).split() if root_mode() else []
+    names = sorted(names, key=lambda x: (x.lower() != target, x))
     for n in names:
         p = os.path.join(base, n)
-        if n.lower() == target and _path_exists(p):
+        ok = _is_autoexec_name(n) if target == "autoexec" else n.lower() == target
+        if ok and _path_exists(p):
             return p
     return None
 
